@@ -414,15 +414,36 @@ class ClusteringRunner:
     ) -> np.ndarray:
         """Run an algorithm and time it."""
         t0 = time.time()
-        labels = func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        
+        # Handle different return types
+        if isinstance(result, tuple):
+            # If function returns a tuple, assume first element is labels
+            labels = result[0]
+        else:
+            # If function returns directly, use as is
+            labels = result
+        
+        # Ensure labels is a numpy array
+        if not isinstance(labels, np.ndarray):
+            print(f"WARNING: {name} returned {type(labels)}, converting to array")
+            labels = np.array(labels, dtype=np.int64)
+        
         elapsed = time.time() - t0
         
         self.runtimes[name] = elapsed
         self.labels[name] = labels
         
         if self.verbose:
-            n_clusters = len(set(labels[labels != -1]))
-            noise_pct = (labels == -1).mean() * 100 if len(labels) > 0 else 0
+            # Handle both regular labels and labels with noise (-1)
+            clean_labels = labels[labels != -1] if len(labels) > 0 else labels
+            n_clusters = len(set(clean_labels)) if len(clean_labels) > 0 else 0
+            
+            if len(labels) > 0:
+                noise_pct = (labels == -1).mean() * 100
+            else:
+                noise_pct = 0.0
+            
             print(f"{name:30s} | clusters={n_clusters:3d} | noise={noise_pct:5.1f}% | {elapsed:.2f}s")
         
         return labels
