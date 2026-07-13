@@ -258,6 +258,59 @@ def k_medoids(
 
 
 # ============================================================================
+# K-Median Implementation
+# ============================================================================
+
+def k_median(
+    X: np.ndarray,
+    k: int,
+    max_iter: int = 20,
+    random_state: int = RANDOM_STATE,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    K-Median clustering algorithm using Manhattan distance.
+    
+    Args:
+        X: Data points (n_samples, n_features)
+        k: Number of clusters
+        max_iter: Maximum number of iterations
+        random_state: Random seed
+        verbose: Print progress
+    
+    Returns:
+        Tuple of (cluster labels, cluster centers)
+    """
+    rng = get_rng(random_state)
+    n = X.shape[0]
+    
+    # Initialize centers randomly
+    centers = X[rng.choice(n, k, replace=False)].copy()
+    
+    for iteration in range(max_iter):
+        # Assign points to nearest center
+        D = cdist(X, centers, metric='cityblock')
+        labels = np.argmin(D, axis=1)
+        
+        # Update centers (median of each cluster)
+        new_centers = centers.copy()
+        for j in range(k):
+            members = X[labels == j]
+            if len(members) > 0:
+                new_centers[j] = np.median(members, axis=0)
+        
+        # Check convergence
+        if np.allclose(new_centers, centers, rtol=1e-4):
+            break
+        centers = new_centers
+    
+    # Final assignment
+    D = cdist(X, centers, metric='cityblock')
+    labels = np.argmin(D, axis=1)
+    
+    return labels, centers
+
+# ============================================================================
 # Kernel K-Means Implementation (Optimized)
 # ============================================================================
 
