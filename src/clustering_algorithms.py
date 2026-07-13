@@ -753,7 +753,12 @@ def run_clustering_algorithm(
         raise ValueError(f"Unknown algorithm: {algorithm}")
     
     labels = algorithm_map[algorithm](**kwargs)
-    return labels, runner.runtimes[algorithm]
+    # runner.runtimes is keyed by the human-readable name that _run_algorithm
+    # assigned (e.g. 'K-Means'), not by the algorithm_map key (e.g. 'kmeans').
+    # Each call above adds exactly one entry, so the most recently inserted
+    # key is the one we just ran.
+    last_name = next(reversed(runner.runtimes))
+    return labels, runner.runtimes[last_name]
 
 
 # ============================================================================
