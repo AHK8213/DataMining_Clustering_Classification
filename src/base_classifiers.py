@@ -219,13 +219,18 @@ def create_logistic_regression(
     Returns:
         BaseClassifier instance
     """
-    model = LogisticRegression(
+    base_model = LogisticRegression(
         max_iter=1000,
         class_weight='balanced',
         random_state=random_state,
         **kwargs
     )
-    
+
+    if preprocessor is not None:
+        model = Pipeline([('pre', preprocessor), ('clf', base_model)])
+    else:
+        model = Pipeline([('clf', base_model)])
+
     param_grid = LOGISTIC_REGRESSION_PARAMS if use_gridsearch else None
     
     return BaseClassifier(
@@ -254,12 +259,17 @@ def create_decision_tree(
     Returns:
         BaseClassifier instance
     """
-    model = DecisionTreeClassifier(
+    base_model = DecisionTreeClassifier(
         random_state=random_state,
         class_weight='balanced',
         **kwargs
     )
-    
+
+    if preprocessor is not None:
+        model = Pipeline([('pre', preprocessor), ('clf', base_model)])
+    else:
+        model = Pipeline([('clf', base_model)])
+
     param_grid = DECISION_TREE_PARAMS if use_gridsearch else None
     
     return BaseClassifier(
@@ -314,13 +324,18 @@ def create_random_forest(
     Returns:
         BaseClassifier instance
     """
-    model = RandomForestClassifier(
+    base_model = RandomForestClassifier(
         random_state=random_state,
         class_weight='balanced',
         n_jobs=-1,
         **kwargs
     )
-    
+
+    if preprocessor is not None:
+        model = Pipeline([('pre', preprocessor), ('clf', base_model)])
+    else:
+        model = Pipeline([('clf', base_model)])
+
     param_grid = RANDOM_FOREST_PARAMS if use_gridsearch else None
     
     return BaseClassifier(
