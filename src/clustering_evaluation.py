@@ -27,7 +27,7 @@ from src.utils import (
     timer,
     ensure_float64,
 )
-from src.clustering import ClusteringRunner
+from src.clustering_algorithms import ClusteringRunner
 
 warnings.filterwarnings("ignore")
 
@@ -517,7 +517,7 @@ if __name__ == "__main__":
     
     # Test with real clustering
     print("\n--- Clustering Comparison ---")
-    from src.clustering import ClusteringRunner
+    from src.clustering_algorithms import ClusteringRunner
     
     runner = ClusteringRunner(X, k=3, verbose=False)
     labels = runner.run_all()
