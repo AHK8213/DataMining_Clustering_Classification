@@ -360,7 +360,9 @@ def kernel_kmeans(
     
     if n <= 15000:
         K = rbf_kernel(X, gamma=gamma)
-        labels = rng.integers(0, k, size=n)
+        # rng.choice(k, size=n) works for both RandomState and Generator,
+        # unlike rng.integers() which only exists on Generator
+        labels = rng.choice(k, size=n)
         
         for iteration in range(max_iter):
             dist = np.zeros((n, k))
@@ -389,7 +391,9 @@ def kernel_kmeans(
     if verbose:
         print(f"  Kernel K-Means using batch processing (batch_size={batch_size})")
     
-    labels = rng.integers(0, k, size=n)
+    # rng.choice(k, size=n) works for both RandomState and Generator,
+    # unlike rng.integers() which only exists on Generator
+    labels = rng.choice(k, size=n)
     diag_K = np.ones(n)
     
     for iteration in range(max_iter):
