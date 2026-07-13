@@ -20,7 +20,6 @@ from sklearn.cluster import (
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics.pairwise import rbf_kernel
 from sklearn.neighbors import NearestNeighbors
-from sklearn.utils import resample
 
 from src.config import (
     RANDOM_STATE,
@@ -47,24 +46,22 @@ warnings.filterwarnings("ignore")
 # Subsampling Configuration
 # ============================================================================
 
-# Maximum samples for memory-intensive algorithms
 SUBSAMPLE_LIMITS = {
-    'kernel_kmeans': 8000,      # O(n²) memory for kernel matrix
-    'agglomerative_ward': 15000,  # O(n²) for linkage matrix
+    'kernel_kmeans': 8000,
+    'agglomerative_ward': 15000,
     'agglomerative_single': 15000,
     'agglomerative_complete': 15000,
-    'kmedoids': 10000,          # O(cluster_size²) in worst case
-    'gmm': None,                # No subsampling needed (O(n))
-    'dbscan': None,             # No subsampling needed (O(n))
-    'optics': None,             # No subsampling needed (O(n))
-    'hdbscan': None,            # No subsampling needed (O(n))
-    'kmeans': None,             # No subsampling needed (O(n))
-    'bisecting_kmeans': None,   # No subsampling needed (O(n))
-    'kmedian': None,            # No subsampling needed (O(n))
-    'fuzzy_cmeans': None,       # No subsampling needed (O(n))
+    'kmedoids': 10000,
+    'gmm': None,
+    'dbscan': None,
+    'optics': None,
+    'hdbscan': None,
+    'kmeans': None,
+    'bisecting_kmeans': None,
+    'kmedian': None,
+    'fuzzy_cmeans': None,
 }
 
-# Default fallback for algorithms not listed
 DEFAULT_SUBSAMPLE_LIMIT = 20000
 
 
@@ -77,7 +74,7 @@ def get_k_distance_eps(
     k: int = 5,
     percentile: float = DBSCAN_DEFAULT_EPS_PERCENTILE,
     verbose: bool = VERBOSE
-) -> float:
+) -> Tuple[float, np.ndarray]:
     """Determine eps parameter for DBSCAN using k-distance plot."""
     nn = NearestNeighbors(n_neighbors=k).fit(X)
     distances, _ = nn.kneighbors(X)
@@ -127,15 +124,12 @@ def auto_subsample(
     """
     n = X.shape[0]
     
-    # Determine max samples for this algorithm
     if max_samples is None:
         max_samples = SUBSAMPLE_LIMITS.get(algorithm_name, DEFAULT_SUBSAMPLE_LIMIT)
     
-    # If no limit or dataset is small enough, return full data
     if max_samples is None or n <= max_samples:
         return X, None
     
-    # Subsample
     rng = get_rng(random_state)
     indices = rng.choice(n, max_samples, replace=False)
     X_subsampled = X[indices]
@@ -159,9 +153,6 @@ def k_medoids(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     K-Medoids clustering algorithm with optimized memory usage.
-    
-    Uses precomputed pairwise distances for efficiency when dataset is small,
-    falls back to incremental computation for larger datasets.
     """
     try:
         if k <= 0:
@@ -176,31 +167,24 @@ def k_medoids(
         
         rng = get_rng(random_state)
         
-        # For small datasets, precompute full distance matrix once
-        # For large datasets, compute distances on demand to avoid O(n²) memory
-        use_precomputed = n <= 20000  # Threshold for full distance matrix
+        use_precomputed = n <= 20000
         
         if use_precomputed:
-            # Precompute full distance matrix (faster but more memory)
             D_full = cdist(X, X, metric='cityblock').astype(np.float32)
             
-            # Initialize medoids randomly
             medoid_idx = rng.choice(n, k, replace=False)
             labels = np.zeros(n, dtype=np.int64)
             
             for iteration in range(max_iter):
-                # Assign points to nearest medoid using precomputed distances
                 D = D_full[:, medoid_idx]
                 labels = np.argmin(D, axis=1).astype(np.int64)
                 
-                # Update medoids
                 new_medoid_idx = medoid_idx.copy()
                 for j in range(k):
                     members = np.where(labels == j)[0]
                     if len(members) == 0:
                         continue
                     
-                    # Use precomputed distances for intra-cluster distances
                     intra = D_full[np.ix_(members, members)].sum(axis=1)
                     new_medoid_idx[j] = members[np.argmin(intra)]
                 
@@ -208,31 +192,25 @@ def k_medoids(
                     break
                 medoid_idx = new_medoid_idx
             
-            # Final assignment
             D = D_full[:, medoid_idx]
             labels = np.argmin(D, axis=1).astype(np.int64)
             
-            # Free memory
             del D_full
             
         else:
-            # Compute distances on demand (slower but memory efficient)
             medoid_idx = rng.choice(n, k, replace=False)
             labels = np.zeros(n, dtype=np.int64)
             
             for iteration in range(max_iter):
-                # Assign points to nearest medoid
                 D = cdist(X, X[medoid_idx], metric='cityblock')
                 labels = np.argmin(D, axis=1).astype(np.int64)
                 
-                # Update medoids
                 new_medoid_idx = medoid_idx.copy()
                 for j in range(k):
                     members = np.where(labels == j)[0]
                     if len(members) == 0:
                         continue
                     
-                    # Find point with minimum total distance
                     sub = X[members]
                     intra = cdist(sub, sub, metric='cityblock').sum(axis=1)
                     new_medoid_idx[j] = members[np.argmin(intra)]
@@ -241,7 +219,6 @@ def k_medoids(
                     break
                 medoid_idx = new_medoid_idx
             
-            # Final assignment
             D = cdist(X, X[medoid_idx], metric='cityblock')
             labels = np.argmin(D, axis=1).astype(np.int64)
         
@@ -284,31 +261,78 @@ def k_median(
     rng = get_rng(random_state)
     n = X.shape[0]
     
-    # Initialize centers randomly
     centers = X[rng.choice(n, k, replace=False)].copy()
     
     for iteration in range(max_iter):
-        # Assign points to nearest center
         D = cdist(X, centers, metric='cityblock')
         labels = np.argmin(D, axis=1)
         
-        # Update centers (median of each cluster)
         new_centers = centers.copy()
         for j in range(k):
             members = X[labels == j]
             if len(members) > 0:
                 new_centers[j] = np.median(members, axis=0)
         
-        # Check convergence
         if np.allclose(new_centers, centers, rtol=1e-4):
             break
         centers = new_centers
     
-    # Final assignment
     D = cdist(X, centers, metric='cityblock')
     labels = np.argmin(D, axis=1)
     
     return labels, centers
+
+
+# ============================================================================
+# Fuzzy C-Means Implementation
+# ============================================================================
+
+def fuzzy_c_means(
+    X: np.ndarray,
+    c: int,
+    m: float = 2.0,
+    max_iter: int = 150,
+    tol: float = 1e-4,
+    random_state: int = RANDOM_STATE,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Fuzzy C-Means clustering algorithm.
+    
+    Args:
+        X: Data points (n_samples, n_features)
+        c: Number of clusters
+        m: Fuzziness parameter (m > 1)
+        max_iter: Maximum number of iterations
+        tol: Convergence tolerance
+        random_state: Random seed
+        verbose: Print progress
+    
+    Returns:
+        Tuple of (cluster labels, cluster centers, membership matrix)
+    """
+    rng = get_rng(random_state)
+    n = X.shape[0]
+    
+    U = rng.dirichlet(np.ones(c), size=n)
+    
+    for iteration in range(max_iter):
+        um = U ** m
+        centers = (um.T @ X) / um.sum(axis=0)[:, None]
+        
+        dist = cdist(X, centers) + 1e-10
+        inv_dist = dist ** (-2 / (m - 1))
+        U_new = inv_dist / inv_dist.sum(axis=1, keepdims=True)
+        
+        if np.linalg.norm(U_new - U) < tol:
+            U = U_new
+            break
+        U = U_new
+    
+    labels = np.argmax(U, axis=1)
+    
+    return labels, centers, U
+
 
 # ============================================================================
 # Kernel K-Means Implementation (Optimized)
@@ -334,7 +358,6 @@ def kernel_kmeans(
     rng = get_rng(random_state)
     n = X.shape[0]
     
-    # For small datasets, use full kernel matrix
     if n <= 15000:
         K = rbf_kernel(X, gamma=gamma)
         labels = rng.integers(0, k, size=n)
@@ -360,20 +383,15 @@ def kernel_kmeans(
         
         return labels
     
-    # For large datasets, use batch processing to avoid O(n²) memory
     if batch_size is None:
         batch_size = min(5000, n // 4)
     
     if verbose:
         print(f"  Kernel K-Means using batch processing (batch_size={batch_size})")
     
-    # Initialize labels
     labels = rng.integers(0, k, size=n)
+    diag_K = np.ones(n)
     
-    # Pre-compute diagonal of kernel matrix once (O(n) memory)
-    diag_K = np.ones(n)  # For RBF kernel, diag is always 1
-    
-    # Process in batches
     for iteration in range(max_iter):
         dist = np.zeros((n, k))
         
@@ -383,32 +401,26 @@ def kernel_kmeans(
                 dist[:, j] = np.inf
                 continue
             
-            # Compute Kjj (scalar)
             if len(members) > 1:
-                # Sample members for estimating Kjj if cluster is large
                 if len(members) > 1000:
                     sample_members = rng.choice(members, min(1000, len(members)), replace=False)
                     Kjj = rbf_kernel(X[sample_members], gamma=gamma).mean()
                 else:
                     Kjj = rbf_kernel(X[members], gamma=gamma).mean()
             else:
-                Kjj = 1.0  # K(x, x) = 1 for RBF
+                Kjj = 1.0
             
-            # Compute Kij for all points in batches
             Kij = np.zeros(n)
             for start in range(0, n, batch_size):
                 end = min(start + batch_size, n)
                 batch_X = X[start:end]
-                # Compute kernel between batch and cluster members
                 if len(members) > 1000 and len(members) > len(members) // 4:
-                    # Sample members for large clusters
                     sample_members = rng.choice(members, min(1000, len(members)), replace=False)
                     K_batch = rbf_kernel(batch_X, X[sample_members], gamma=gamma).mean(axis=1)
                 else:
                     K_batch = rbf_kernel(batch_X, X[members], gamma=gamma).mean(axis=1)
                 Kij[start:end] = K_batch
             
-            # Distance in kernel space: ||phi(x) - mu_j||² = K(x,x) - 2*K(x, mu_j) + K(mu_j, mu_j)
             dist[:, j] = diag_K - 2 * Kij + Kjj
         
         new_labels = np.argmin(dist, axis=1)
@@ -427,10 +439,6 @@ def kernel_kmeans(
 class ClusteringRunner:
     """
     Unified interface for running all clustering algorithms with auto-subsampling.
-    
-    Usage:
-        runner = ClusteringRunner(X, verbose=True)
-        results = runner.run_all()
     """
     
     def __init__(
@@ -441,16 +449,6 @@ class ClusteringRunner:
         verbose: bool = VERBOSE,
         auto_subsample: bool = True
     ):
-        """
-        Initialize clustering runner.
-        
-        Args:
-            X: Data points
-            k: Number of clusters (if fixed K is needed)
-            random_state: Random seed
-            verbose: Print progress
-            auto_subsample: Automatically subsample for memory-intensive algorithms
-        """
         self.X_full = ensure_float64(X)
         self.k = k
         self.random_state = random_state
@@ -459,9 +457,7 @@ class ClusteringRunner:
         self.results = {}
         self.labels = {}
         self.runtimes = {}
-        self.subsample_info = {}  # Track which algorithms were subsampled
-        
-        # Store original dataset size
+        self.subsample_info = {}
         self.n_full = X.shape[0]
     
     def _prepare_data(
@@ -469,12 +465,6 @@ class ClusteringRunner:
         algorithm_name: str,
         max_samples: Optional[int] = None
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """
-        Prepare data for an algorithm, applying subsampling if needed.
-        
-        Returns:
-            Tuple of (data_to_use, original_indices or None)
-        """
         if not self.auto_subsample:
             return self.X_full, None
         
@@ -494,15 +484,12 @@ class ClusteringRunner:
         max_samples: Optional[int] = None,
         **kwargs
     ) -> np.ndarray:
-        """Run an algorithm with optional subsampling and time it."""
-        # Prepare data
         if use_subsample and self.auto_subsample:
             X_use, indices_used = self._prepare_data(name, max_samples)
         else:
             X_use = self.X_full
             indices_used = None
         
-        # Store subsample info
         if indices_used is not None:
             self.subsample_info[name] = {
                 'n_full': self.n_full,
@@ -510,30 +497,24 @@ class ClusteringRunner:
                 'indices': indices_used
             }
         
-        # Run algorithm
         t0 = time.time()
         
-        # Replace first argument with subsampled X if needed
         if args and isinstance(args[0], np.ndarray) and args[0] is self.X_full:
             args = (X_use,) + args[1:]
         
         result = func(*args, **kwargs)
         
-        # Handle different return types
         if isinstance(result, tuple):
             labels = result[0]
         else:
             labels = result
         
-        # Ensure labels is a numpy array
         if not isinstance(labels, np.ndarray):
             labels = np.array(labels, dtype=np.int64)
         
         elapsed = time.time() - t0
         
-        # If subsampled, map labels back to full dataset
         if indices_used is not None:
-            # Create full labels array with -1 for unsampled points
             full_labels = -np.ones(self.n_full, dtype=np.int64)
             full_labels[indices_used] = labels
             labels = full_labels
@@ -542,7 +523,6 @@ class ClusteringRunner:
         self.labels[name] = labels
         
         if self.verbose:
-            # Count clusters (excluding noise)
             clean_labels = labels[labels != -1] if len(labels) > 0 else labels
             n_clusters = len(set(clean_labels)) if len(clean_labels) > 0 else 0
             
@@ -559,12 +539,7 @@ class ClusteringRunner:
         
         return labels
     
-    # ========================================================================
-    # Centroid-Based Algorithms
-    # ========================================================================
-    
     def run_kmeans(self, **kwargs) -> np.ndarray:
-        """Run standard K-Means."""
         if self.k is None:
             raise ValueError("k must be specified for K-Means")
         
@@ -577,12 +552,11 @@ class ClusteringRunner:
         )
         labels = self._run_algorithm(
             name, model.fit_predict, self.X_full,
-            use_subsample=False  # K-Means is memory-efficient
+            use_subsample=False
         )
         return labels
     
     def run_bisecting_kmeans(self, **kwargs) -> np.ndarray:
-        """Run Bisecting K-Means."""
         if self.k is None:
             raise ValueError("k must be specified for Bisecting K-Means")
         
@@ -599,7 +573,6 @@ class ClusteringRunner:
         return labels
     
     def run_kmedoids(self, **kwargs) -> np.ndarray:
-        """Run K-Medoids with automatic subsampling."""
         if self.k is None:
             raise ValueError("k must be specified for K-Medoids")
         
@@ -616,7 +589,6 @@ class ClusteringRunner:
         return labels
     
     def run_kmedian(self, **kwargs) -> np.ndarray:
-        """Run K-Median."""
         if self.k is None:
             raise ValueError("k must be specified for K-Median")
         
@@ -633,7 +605,6 @@ class ClusteringRunner:
         return labels
     
     def run_fuzzy_cmeans(self, **kwargs) -> np.ndarray:
-        """Run Fuzzy C-Means."""
         if self.k is None:
             raise ValueError("k must be specified for Fuzzy C-Means")
         
@@ -650,7 +621,6 @@ class ClusteringRunner:
         return labels
     
     def run_kernel_kmeans(self, gamma: Optional[float] = None, **kwargs) -> np.ndarray:
-        """Run Kernel K-Means with auto-subsampling."""
         if self.k is None:
             raise ValueError("k must be specified for Kernel K-Means")
         
@@ -667,21 +637,15 @@ class ClusteringRunner:
         )
         return labels
     
-    # ========================================================================
-    # Density-Based Algorithms
-    # ========================================================================
-    
     def run_dbscan(
         self,
         eps: Optional[float] = None,
         min_samples: int = DBSCAN_DEFAULT_MIN_SAMPLES,
         **kwargs
     ) -> np.ndarray:
-        """Run DBSCAN."""
         name = 'DBSCAN'
         
         if eps is None:
-            # Compute eps on full data for accuracy
             eps, _ = get_k_distance_eps(self.X_full, k=min_samples, verbose=False)
         
         model = DBSCAN(eps=eps, min_samples=min_samples, **kwargs)
@@ -696,7 +660,6 @@ class ClusteringRunner:
         min_samples: int = OPTICS_DEFAULT_MIN_SAMPLES,
         **kwargs
     ) -> np.ndarray:
-        """Run OPTICS."""
         name = 'OPTICS'
         model = OPTICS(min_samples=min_samples, **kwargs)
         labels = self._run_algorithm(
@@ -710,7 +673,6 @@ class ClusteringRunner:
         min_cluster_size: int = HDBSCAN_DEFAULT_MIN_CLUSTER_SIZE,
         **kwargs
     ) -> np.ndarray:
-        """Run HDBSCAN."""
         name = 'HDBSCAN'
         model = HDBSCAN(min_cluster_size=min_cluster_size, **kwargs)
         labels = self._run_algorithm(
@@ -719,16 +681,11 @@ class ClusteringRunner:
         )
         return labels
     
-    # ========================================================================
-    # Hierarchical Algorithms
-    # ========================================================================
-    
     def run_agglomerative(
         self,
         linkage: str = 'ward',
         **kwargs
     ) -> np.ndarray:
-        """Run Agglomerative Clustering with auto-subsampling."""
         if self.k is None:
             raise ValueError("k must be specified for Agglomerative Clustering")
         
@@ -746,19 +703,13 @@ class ClusteringRunner:
         return labels
     
     def run_all_linkages(self) -> Dict[str, np.ndarray]:
-        """Run Agglomerative with all three linkages."""
         results = {}
         for linkage in ['ward', 'single', 'complete']:
             labels = self.run_agglomerative(linkage=linkage)
             results[linkage] = labels
         return results
     
-    # ========================================================================
-    # Probabilistic Algorithms
-    # ========================================================================
-    
     def run_gmm(self, **kwargs) -> np.ndarray:
-        """Run Gaussian Mixture Model."""
         if self.k is None:
             raise ValueError("k must be specified for GMM")
         
@@ -774,25 +725,11 @@ class ClusteringRunner:
         )
         return labels
     
-    # ========================================================================
-    # Run All Algorithms
-    # ========================================================================
-    
     def run_all(
         self,
         include_manual: bool = True,
         **kwargs
     ) -> Dict[str, np.ndarray]:
-        """
-        Run all clustering algorithms with intelligent subsampling.
-        
-        Args:
-            include_manual: Include manual implementations
-            **kwargs: Additional arguments passed to algorithms
-        
-        Returns:
-            Dictionary mapping algorithm names to labels
-        """
         if self.k is None:
             raise ValueError("k must be specified to run all algorithms")
         
@@ -802,7 +739,6 @@ class ClusteringRunner:
             print(f"Auto-subsampling: {'ON' if self.auto_subsample else 'OFF'}")
             print(f"{'='*70}\n")
         
-        # Centroid-based
         self.run_kmeans(**kwargs)
         self.run_bisecting_kmeans(**kwargs)
         
@@ -812,20 +748,16 @@ class ClusteringRunner:
             self.run_fuzzy_cmeans(**kwargs)
             self.run_kernel_kmeans(**kwargs)
         
-        # Density-based
         self.run_dbscan(**kwargs)
         self.run_optics(**kwargs)
         self.run_hdbscan(**kwargs)
         
-        # Hierarchical
         self.run_all_linkages()
         
-        # Probabilistic
         self.run_gmm(**kwargs)
         
         cleanup()
         
-        # Print summary
         if self.verbose:
             print(f"\n{'='*70}")
             print(f"SUBSAMPLING SUMMARY:")
@@ -837,7 +769,6 @@ class ClusteringRunner:
         return self.labels
     
     def get_results(self) -> Dict[str, Any]:
-        """Get all results."""
         return {
             'labels': self.labels,
             'runtimes': self.runtimes,
@@ -857,19 +788,6 @@ def run_all_clustering(
     verbose: bool = VERBOSE,
     auto_subsample: bool = True
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
-    """
-    Convenience function to run all clustering algorithms with auto-subsampling.
-    
-    Args:
-        X: Data points
-        k: Number of clusters
-        random_state: Random seed
-        verbose: Print progress
-        auto_subsample: Automatically subsample memory-intensive algorithms
-    
-    Returns:
-        Tuple of (labels_dict, runtimes_dict)
-    """
     runner = ClusteringRunner(
         X, k=k, random_state=random_state,
         verbose=verbose, auto_subsample=auto_subsample
@@ -885,19 +803,6 @@ def run_clustering_algorithm(
     auto_subsample: bool = True,
     **kwargs
 ) -> Tuple[np.ndarray, float]:
-    """
-    Run a single clustering algorithm by name with optional subsampling.
-    
-    Args:
-        X: Data points
-        algorithm: Algorithm name
-        k: Number of clusters (if applicable)
-        auto_subsample: Apply subsampling for memory-intensive algorithms
-        **kwargs: Algorithm-specific parameters
-    
-    Returns:
-        Tuple of (labels, runtime)
-    """
     runner = ClusteringRunner(X, k=k, verbose=False, auto_subsample=auto_subsample)
     
     algorithm_map = {
@@ -933,25 +838,15 @@ if __name__ == "__main__":
     
     from sklearn.datasets import make_blobs
     
-    # Generate test data with 50k samples to test subsampling
     X, y = make_blobs(n_samples=50000, centers=3, random_state=42)
     X = X.astype(np.float64)
     
     print(f"Test data shape: {X.shape} (50,000 samples)")
     
-    # Test with auto-subsampling
     runner = ClusteringRunner(X, k=3, verbose=True, auto_subsample=True)
     labels = runner.run_all()
     
     print(f"\nRan {len(labels)} algorithms successfully!")
     print(f"Subsampled algorithms: {len(runner.subsample_info)}")
-    
-    # Test without subsampling (should still work for memory-efficient algorithms)
-    print("\n" + "="*70)
-    print("Testing without subsampling (should work for all except Kernel K-Means):")
-    runner_no_subsample = ClusteringRunner(
-        X[:10000], k=3, verbose=True, auto_subsample=False
-    )
-    labels_no_subsample = runner_no_subsample.run_all(include_manual=False)
     
     print("\nAll tests passed!")
