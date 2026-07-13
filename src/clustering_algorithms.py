@@ -127,9 +127,6 @@ def k_medoids(
         Tuple of (cluster labels, medoid indices)
     """
     try:
-        # Debug print
-        print(f"DEBUG: k_medoids called with k={k}, X shape={X.shape}")
-        
         # Input validation
         if k <= 0:
             raise ValueError(f"k must be positive, got {k}")
@@ -177,9 +174,6 @@ def k_medoids(
         # Ensure we return a proper numpy array
         if not isinstance(labels, np.ndarray):
             labels = np.array(labels, dtype=np.int64)
-        
-        # Debug print
-        print(f"DEBUG: k_medoids returning labels with shape={labels.shape}, dtype={labels.dtype}")
         
         return labels, medoid_idx
         
@@ -341,7 +335,7 @@ def kernel_kmeans(
     K = rbf_kernel(X, gamma=gamma)
     
     # Initialize labels randomly
-    labels = rng.randint(0, k, size=n)
+    labels = rng.integers(0, k, size=n)
     
     for iteration in range(max_iter):
         # Compute distance to each cluster in kernel space
@@ -487,7 +481,7 @@ class ClusteringRunner:
             raise ValueError("k must be specified for K-Medoids")
         
         name = 'K-Medoids'
-        labels, _ = self._run_algorithm(
+        labels = self._run_algorithm(
             name,
             k_medoids,
             self.X,
@@ -503,7 +497,7 @@ class ClusteringRunner:
             raise ValueError("k must be specified for K-Median")
         
         name = 'K-Median'
-        labels, _ = self._run_algorithm(
+        labels = self._run_algorithm(
             name,
             k_median,
             self.X,
@@ -519,7 +513,7 @@ class ClusteringRunner:
             raise ValueError("k must be specified for Fuzzy C-Means")
         
         name = 'Fuzzy C-Means'
-        labels, _, _ = self._run_algorithm(
+        labels = self._run_algorithm(
             name,
             fuzzy_c_means,
             self.X,
