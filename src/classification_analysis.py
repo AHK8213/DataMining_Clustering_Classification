@@ -384,6 +384,7 @@ class PreCallAnalyzer:
         
         self.full_results = None
         self.pre_call_results = None
+        self._last_results = None
         
         # Get feature availability
         self.availability = get_feature_availability()
@@ -408,21 +409,20 @@ class PreCallAnalyzer:
         """
         import xgboost as xgb
         from sklearn.model_selection import train_test_split
-        
+        from src.classification_prep import prepare_classification_data, prepare_pre_call_data
+
         if num_cols is None:
             num_cols = NUM_COLS
         if cat_cols is None:
             cat_cols = CAT_COLS
         
         # Prepare full data
-        from src.classification_prep import prepare_classification_data
         X_train_full, y_train_full, X_test_full, y_test_full, preprocessor_full = prepare_classification_data(
             self.df, self.target_col, self.test_size, self.random_state,
             num_cols, cat_cols, verbose=False
         )
         
         # Prepare pre-call data
-        from src.classification_prep import prepare_pre_call_data
         X_train_pc, y_train_pc, X_test_pc, y_test_pc, preprocessor_pc = prepare_pre_call_data(
             self.df, self.target_col, self.test_size, self.random_state, verbose=False
         )
@@ -435,7 +435,6 @@ class PreCallAnalyzer:
         X_test_pc_enc = preprocessor_pc.transform(X_test_pc).astype(np.float64)
         
         # Split validation sets
-        from sklearn.model_selection import train_test_split
         X_train_full, X_val_full, y_train_full, y_val_full = train_test_split(
             X_train_full_enc, y_train_full, test_size=0.15,
             random_state=self.random_state, stratify=y_train_full
@@ -497,7 +496,7 @@ class PreCallAnalyzer:
         y_proba_pc = model_pc.predict_proba(X_test_pc_enc)[:, 1]
         
         # Compute metrics
-        from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
+        from sklearn.metrics import accuracy_score
         
         self.full_results = {
             'f1': f1_score(y_test_full, y_pred_full),
@@ -523,13 +522,28 @@ class PreCallAnalyzer:
                   f"AUC={self.pre_call_results['auc_roc']:.3f}")
             print(f"Features excluded: {self.post_call_features}")
         
-        return {
+        self._last_results = {
             'full': self.full_results,
             'pre_call': self.pre_call_results,
             'models': (model_full, model_pc),
             'preprocessors': (preprocessor_full, preprocessor_pc),
             'data': (X_test_full_enc, X_test_pc_enc, y_test_full, y_test_pc)
         }
+        return self._last_results
+
+    def get_test_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Convenience accessor for the test data produced by compare_with_xgboost(),
+        e.g. for downstream lift analysis. Avoids fragile positional unpacking of
+        the results dict (results.values() ordering is not guaranteed to stay the
+        same length if new keys are added later).
+
+        Returns:
+            (X_test_full_enc, X_test_pc_enc, y_test_full, y_test_pc)
+        """
+        if getattr(self, "_last_results", None) is None:
+            raise ValueError("Run compare_with_xgboost() first.")
+        return self._last_results['data']
     
     def get_comparison_df(self) -> pd.DataFrame:
         """
@@ -541,11 +555,18 @@ class PreCallAnalyzer:
         if self.full_results is None or self.pre_call_results is None:
             raise ValueError("Run compare_with_xgboost() first.")
         
-        df = pd.DataFrame([
-            {'model': 'Full Features', **self.full_results},
-            {'model': 'Pre-Call Features', **self.pre_call_results}
-        ])
-        
+        # 'features_excluded' is a list-valued key that only exists on
+        # pre_call_results; keep it out of the tabular comparison (it doesn't
+        # tabulate cleanly) and expose it separately instead.
+        full_row = {'model': 'Full Features', **self.full_results}
+        pc_row = {
+            k: v for k, v in self.pre_call_results.items()
+            if k != 'features_excluded'
+        }
+        pc_row = {'model': 'Pre-Call Features', **pc_row}
+
+        df = pd.DataFrame([full_row, pc_row])
+
         return df
     
     def get_report(self) -> str:
