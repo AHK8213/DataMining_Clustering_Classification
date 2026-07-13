@@ -53,7 +53,7 @@ warnings.filterwarnings("ignore")
 
 def load_data(
     url: str = DATA_URL,
-    local_path: Optional[str] = None,
+    local_path: Optional[bool] = False,
     verbose: bool = VERBOSE
 ) -> pd.DataFrame:
     """
@@ -501,7 +501,7 @@ def prepare_data_for_clustering(
     """
     with timer("Data preparation", verbose=verbose):
         # 1. Load data
-        df = load_data(url, verbose=verbose)
+        df = load_data(url, local_path=True, verbose=verbose)
         
         # 2. Clean data
         df = clean_data(df, verbose=verbose)
@@ -662,7 +662,7 @@ if __name__ == "__main__":
     print("Testing data_preparation.py...")
     
     # Test loading
-    df = load_data(verbose=True)
+    df = load_data(local_path=True, verbose=True)
     print(f"Loaded {len(df)} rows")
     
     # Test cleaning

@@ -348,7 +348,7 @@ if __name__ == "__main__":
     from src.data_preparation import load_data, clean_data, engineer_features
     
     # Load data
-    df = load_data(verbose=False)
+    df = load_data(local_path=True, verbose=False)
     df = clean_data(df, verbose=False)
     df = engineer_features(df, verbose=False)
     
