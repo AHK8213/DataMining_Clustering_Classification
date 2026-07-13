@@ -13,6 +13,7 @@ import time
 import warnings
 from typing import Tuple, Optional, Dict, Any, List, Callable
 
+import pandas as pd
 import numpy as np
 from sklearn.tree import DecisionTreeClassifier
 
