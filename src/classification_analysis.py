@@ -695,7 +695,16 @@ def compare_small_vs_full_dataset(
     if verbose:
         print(f"Training on small dataset ({small_size} rows)...")
     
-    df_small, _ = prepare_small_dataset(df, small_size, target_col, random_state, verbose=False)
+    df_small, _ = prepare_small_dataset(
+        df,
+        small_size,
+        target_col,
+        random_state,
+        verbose=False
+    )
+    
+    df_small = df_small[df_small[target_col] != 'unknown'].copy()
+    df_small[target_col] = (df_small[target_col] == 'yes').astype(int)
     
     X_small = df_small.drop(columns=[target_col])
     y_small = df_small[target_col]
