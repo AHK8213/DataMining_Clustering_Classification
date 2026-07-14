@@ -3,7 +3,7 @@ clustering_tendency.py - Clustering tendency assessment
 
 Provides:
 - Hopkins statistic computation
-- KL Divergence for measuring distance between distributions
+- Spatial histogram KL/JS divergence (data vs. random) for clustering tendency
 - Comprehensive visualization of clustering tendency
 - Interpretation of results
 """
@@ -14,12 +14,6 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.neighbors import NearestNeighbors
-from scipy.special import kl_div, rel_entr
-from scipy.stats import entropy
-from sklearn.mixture import GaussianMixture
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
 
 from src.config import RANDOM_STATE, SAMPLE_HOPKINS, VERBOSE
 from src.utils import hopkins_statistic, interpret_hopkins, get_sample
@@ -95,184 +89,164 @@ def js_divergence(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
     return (kl_divergence(p, m, eps) + kl_divergence(q, m, eps)) / 2
 
 
-def kl_between_clusters(
+# ============================================================================
+# Spatial Histogram Approach (KL-based Clustering Tendency)
+# ============================================================================
+
+def _reduce_dims_for_histogram(
     X: np.ndarray,
-    labels: np.ndarray,
-    method: str = 'gmm',
-    n_components: int = 10
-) -> Dict[str, Any]:
+    max_dims: int = 3,
+    random_state: int = RANDOM_STATE
+):
     """
-    Compute KL divergence between cluster distributions.
-    
-    Measures how different the feature distributions are across clusters.
-    Higher KL divergence indicates more distinct clusters.
-    
+    PCA-reduce data for joint histogram binning when dimensionality is too
+    high. A full joint histogram has n_bins**d cells, so beyond a handful
+    of dimensions it becomes mostly-empty and statistically meaningless.
+
     Args:
         X: Data points (n_samples, n_features)
-        labels: Cluster labels
-        method: 'gmm' for Gaussian Mixture, 'histogram' for binned histograms
-        n_components: Number of components for GMM or bins for histogram
-    
+        max_dims: Max number of dimensions to keep. If X already has
+            <= max_dims features, X is returned unchanged (no PCA).
+        random_state: Random seed for PCA
+
     Returns:
-        Dictionary containing KL divergence results
+        (X_reduced, pca_or_None)
     """
-    labels = np.asarray(labels)
-    unique_labels = [l for l in np.unique(labels) if l != -1]
-    n_clusters = len(unique_labels)
-    
-    if n_clusters < 2:
-        return {
-            'kl_divergence': np.nan,
-            'symmetric_kl': np.nan,
-            'js_divergence': np.nan,
-            'pairwise_kl': {},
-            'method': method,
-            'n_clusters': n_clusters,
-            'unique_labels': unique_labels
-        }
-    
-    # Standardize data for better GMM fitting
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Fit GMM for each cluster
-    cluster_gmms = {}
-    for label in unique_labels:
-        mask = labels == label
-        X_cluster = X_scaled[mask]
-        if len(X_cluster) > 2 * n_components:
-            gmm = GaussianMixture(
-                n_components=min(n_components, max(1, len(X_cluster) // 3)),
-                random_state=RANDOM_STATE
-            )
-            gmm.fit(X_cluster)
-            cluster_gmms[label] = gmm
-        else:
-            # For small clusters, use a simple multivariate normal
-            mean = X_cluster.mean(axis=0)
-            cov = np.cov(X_cluster.T) + np.eye(X.shape[1]) * 1e-6
-            cluster_gmms[label] = {'mean': mean, 'cov': cov, 'type': 'single'}
-    
-    # Compute KL divergence between clusters
-    pairwise_kl = {}
-    
-    for i, label_i in enumerate(unique_labels):
-        for j, label_j in enumerate(unique_labels):
-            if i >= j:
-                continue
-            pair_key = f"{label_i}_{label_j}"
-            
-            # Compute KL divergence between GMMs
-            gmm_i = cluster_gmms[label_i]
-            gmm_j = cluster_gmms[label_j]
-            
-            if isinstance(gmm_i, GaussianMixture) and isinstance(gmm_j, GaussianMixture):
-                # Use Monte Carlo approximation for GMM KL
-                kl_ij = _kl_gmm_mc(gmm_i, gmm_j, n_samples=1000)
-                kl_ji = _kl_gmm_mc(gmm_j, gmm_i, n_samples=1000)
-            else:
-                # Use analytical formula for single Gaussian
-                kl_ij = _kl_gaussian(gmm_i, gmm_j)
-                kl_ji = _kl_gaussian(gmm_j, gmm_i)
-            
-            pairwise_kl[pair_key] = {
-                'kl_ij': kl_ij,
-                'kl_ji': kl_ji,
-                'symmetric_kl': (kl_ij + kl_ji) / 2
-            }
-    
-    # Aggregate results
-    all_symmetric = [v['symmetric_kl'] for v in pairwise_kl.values()] if pairwise_kl else [np.nan]
-    
+    if X.shape[1] <= max_dims:
+        return X, None
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=max_dims, random_state=random_state)
+    X_reduced = pca.fit_transform(X)
+    return X_reduced, pca
+
+
+def spatial_histogram_kl(
+    X: np.ndarray,
+    n_bins: int = 5,
+    max_dims: int = 3,
+    random_state: int = RANDOM_STATE,
+    eps: float = 1e-10
+) -> Dict[str, Any]:
+    """
+    Assess clustering tendency via the spatial histogram approach.
+
+    Contrasts the d-dimensional empirical histogram (EPMF) of the actual
+    dataset D with the histogram of uniformly random data sampled from the
+    same bounding box. D is considered clusterable if the two distributions
+    differ substantially (high KL / JS divergence) -- if D were itself
+    uniformly random, its histogram would closely match the random one.
+
+    Method:
+        1. Divide each (reduced) dimension into `n_bins` equi-width bins
+           and count points per cell -> EPMF of D.
+        2. Draw the same number of points uniformly at random from D's
+           bounding box, using the *same* bin edges -> EPMF of random data.
+        3. Quantify the difference between the two EPMFs with KL divergence.
+
+    Note on dimensionality: a full joint histogram has n_bins**d cells, so
+    it is only meaningful in low dimensions. If X has more than `max_dims`
+    features, it is PCA-reduced to `max_dims` components first. Set
+    max_dims >= X.shape[1] to disable this reduction (only recommended for
+    already low-dimensional data).
+
+    Args:
+        X: Data points (n_samples, n_features)
+        n_bins: Number of equi-width bins per dimension
+        max_dims: Max dimensionality for the joint histogram; X is
+            PCA-reduced to this many components if it has more features
+        random_state: Random seed
+        eps: Small epsilon to avoid log(0) / division by 0
+
+    Returns:
+        Dictionary with kl_divergence (D || random), kl_divergence_reverse
+        (random || D), symmetric_kl, js_divergence, the two EPMFs, bin
+        edges, and metadata about any PCA reduction applied.
+    """
+    X = np.asarray(X)
+    X_hist, pca = _reduce_dims_for_histogram(X, max_dims=max_dims, random_state=random_state)
+
+    n_samples, d = X_hist.shape
+    mins, maxs = X_hist.min(axis=0), X_hist.max(axis=0)
+
+    # Guard against zero-width dimensions (constant feature after reduction)
+    ranges = maxs - mins
+    zero_range = ranges == 0
+    if np.any(zero_range):
+        maxs = maxs.copy()
+        maxs[zero_range] = mins[zero_range] + eps
+
+    bins = [n_bins] * d
+    bin_range = [(mins[i], maxs[i]) for i in range(d)]
+
+    # EPMF of the actual data
+    hist_data, edges = np.histogramdd(X_hist, bins=bins, range=bin_range)
+    epmf_data = hist_data / hist_data.sum()
+
+    # EPMF of uniform random data over the same bounding box, same bins
+    rng = np.random.RandomState(random_state)
+    X_random = rng.uniform(mins, maxs, size=(n_samples, d))
+    hist_random, _ = np.histogramdd(X_random, bins=bins, range=bin_range)
+    epmf_random = hist_random / hist_random.sum()
+
+    kl = kl_divergence(epmf_data, epmf_random, eps=eps)
+    kl_rev = kl_divergence(epmf_random, epmf_data, eps=eps)
+    sym_kl = (kl + kl_rev) / 2
+    js = js_divergence(epmf_data, epmf_random, eps=eps)
+
     return {
-        'kl_divergence': np.mean([v['kl_ij'] for v in pairwise_kl.values()]) if pairwise_kl else np.nan,
-        'symmetric_kl': np.mean(all_symmetric),
-        'js_divergence': np.mean([_kl_to_js(v['symmetric_kl']) for v in pairwise_kl.values()]) if pairwise_kl else np.nan,
-        'pairwise_kl': pairwise_kl,
-        'method': method,
-        'n_clusters': n_clusters,
-        'unique_labels': unique_labels,
-        'max_kl': max(all_symmetric) if all_symmetric and not np.isnan(all_symmetric[0]) else np.nan,
-        'min_kl': min(all_symmetric) if all_symmetric and not np.isnan(all_symmetric[0]) else np.nan,
+        'kl_divergence': kl,
+        'kl_divergence_reverse': kl_rev,
+        'symmetric_kl': sym_kl,
+        'js_divergence': js,
+        'epmf_data': epmf_data,
+        'epmf_random': epmf_random,
+        'bin_edges': edges,
+        'n_bins': n_bins,
+        'n_dims_used': d,
+        'n_dims_original': X.shape[1],
+        'pca_reduced': pca is not None,
+        'explained_variance_ratio': pca.explained_variance_ratio_.tolist() if pca is not None else None,
     }
 
 
-def _kl_gmm_mc(gmm_i, gmm_j, n_samples: int = 1000) -> float:
+def interpret_histogram_tendency(js: float) -> str:
     """
-    Approximate KL divergence between two GMMs using Monte Carlo sampling.
-    
-    KL(GMM_i || GMM_j) ≈ (1/N) * sum(log(p_i(x) / p_j(x)))
-    """
-    try:
-        samples = gmm_i.sample(n_samples)[0]
-        log_p_i = gmm_i.score_samples(samples)
-        log_p_j = gmm_j.score_samples(samples)
-        return np.mean(log_p_i - log_p_j)
-    except:
-        return np.nan
+    Interpret the JS divergence from the spatial histogram approach.
 
+    Args:
+        js: Jensen-Shannon divergence between data and random EPMFs
 
-def _kl_gaussian(gmm_i, gmm_j) -> float:
+    Returns:
+        Interpretation string
     """
-    Compute KL divergence between two Gaussian distributions.
-    
-    For multivariate normal distributions:
-    KL(N(μ1, Σ1) || N(μ2, Σ2)) = 0.5 * (log(det(Σ2)/det(Σ1)) - d + trace(Σ2^{-1}Σ1) + (μ2-μ1)^T Σ2^{-1} (μ2-μ1))
-    """
-    try:
-        if isinstance(gmm_i, dict) and gmm_i.get('type') == 'single':
-            mean_i = gmm_i['mean']
-            cov_i = gmm_i['cov']
-        else:
-            mean_i = gmm_i.means_[0] if gmm_i.means_.shape[0] == 1 else gmm_i.means_[0]
-            cov_i = gmm_i.covariances_[0] if gmm_i.covariances_.shape[0] == 1 else gmm_i.covariances_[0]
-        
-        if isinstance(gmm_j, dict) and gmm_j.get('type') == 'single':
-            mean_j = gmm_j['mean']
-            cov_j = gmm_j['cov']
-        else:
-            mean_j = gmm_j.means_[0] if gmm_j.means_.shape[0] == 1 else gmm_j.means_[0]
-            cov_j = gmm_j.covariances_[0] if gmm_j.covariances_.shape[0] == 1 else gmm_j.covariances_[0]
-        
-        d = len(mean_i)
-        
-        # Add small regularization for numerical stability
-        cov_i = cov_i + np.eye(d) * 1e-6
-        cov_j = cov_j + np.eye(d) * 1e-6
-        
-        inv_cov_j = np.linalg.inv(cov_j)
-        term1 = np.log(np.linalg.det(cov_j) / np.linalg.det(cov_i))
-        term2 = -d
-        term3 = np.trace(inv_cov_j @ cov_i)
-        diff = mean_j - mean_i
-        term4 = diff.T @ inv_cov_j @ diff
-        return 0.5 * (term1 + term2 + term3 + term4)
-    except:
-        return np.nan
-
-
-def _kl_to_js(kl_value: float) -> float:
-    """
-    Convert symmetric KL to JS divergence (approximation).
-    JS is bounded [0, log(2)] ≈ [0, 0.693].
-    """
-    return 1 - np.exp(-kl_value if not np.isnan(kl_value) else 0)
+    if np.isnan(js):
+        return "Insufficient data for spatial histogram KL computation."
+    elif js > 0.3:
+        return f"Strong clustering tendency (JS={js:.3f}). Data's spatial distribution differs substantially from random."
+    elif js > 0.15:
+        return f"Moderate clustering tendency (JS={js:.3f}). Data shows some non-random spatial structure."
+    elif js > 0.05:
+        return f"Weak clustering tendency (JS={js:.3f}). Data is only slightly different from random."
+    else:
+        return f"Little to no clustering tendency (JS={js:.3f}). Data closely resembles a uniform/random distribution."
 
 
 # ============================================================================
-# Clustering Tendency Analysis (Enhanced with KL)
+# Clustering Tendency Analysis
 # ============================================================================
 
 class ClusteringTendency:
     """
     Assess clustering tendency of a dataset.
     
-    Enhanced with KL divergence analysis.
+    Combines the Hopkins statistic with the spatial histogram KL/JS
+    divergence approach (data EPMF vs. random EPMF) -- both are
+    pre-clustering diagnostics that require no labels.
     
     Usage:
         tendency = ClusteringTendency(X)
         H = tendency.compute_hopkins()
-        kl_results = tendency.compute_kl_divergence(labels)
+        hist_results = tendency.compute_histogram_tendency()
         tendency.interpret()
         fig = tendency.plot()
     """
@@ -300,8 +274,7 @@ class ClusteringTendency:
         
         self.hopkins_value = None
         self.interpretation = None
-        self.kl_results = None
-        self.prelim_labels = None
+        self.histogram_results = None
         
         # Sample data for faster computation
         self.X_sample, self.idx = get_sample(
@@ -332,62 +305,68 @@ class ClusteringTendency:
         
         return self.hopkins_value
     
-    def compute_kl_divergence(
+    def compute_histogram_tendency(
         self,
-        labels: Optional[np.ndarray] = None,
-        k: Optional[int] = None,
-        method: str = 'gmm',
-        n_components: int = 10,
-        auto_cluster: bool = True,
+        n_bins: int = 5,
+        max_dims: int = 3,
         verbose: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
-        Compute KL divergence between clusters.
-        
+        Assess clustering tendency using the spatial histogram approach.
+
+        Compares the EPMF of the actual data against the EPMF of uniformly
+        random data drawn from the same bounding box (same bin edges).
+        This is a pre-clustering, distribution-based companion to the
+        Hopkins statistic -- it requires no labels or preliminary
+        clustering step.
+
+        Because a full joint histogram has n_bins**max_dims cells, X is
+        PCA-reduced to `max_dims` components first if it has more features
+        than that (see spatial_histogram_kl for details).
+
         Args:
-            labels: Cluster labels (if None, auto-cluster)
-            k: Number of clusters for auto-clustering
-            method: 'gmm' or 'histogram'
-            n_components: Number of components/bins
-            auto_cluster: If True and labels is None, run KMeans automatically
+            n_bins: Number of equi-width bins per dimension
+            max_dims: Max dimensionality for the joint histogram
             verbose: Print progress. Defaults to the instance's verbose
-                setting (set at __init__) when not given.
-        
+                setting when not given.
+
         Returns:
-            Dictionary with KL divergence results
+            Dictionary with KL/JS divergence results (see spatial_histogram_kl)
         """
         verbose = self.verbose if verbose is None else verbose
 
-        if labels is None and auto_cluster:
-            if verbose:
-                print("Auto-clustering for KL divergence analysis...")
-            
-            # Use K=3 as default or specified k
-            k = k or 3
-            kmeans = KMeans(n_clusters=k, n_init=10, random_state=self.random_state)
-            labels = kmeans.fit_predict(self.X)
-            self.prelim_labels = labels
-            
-            if verbose:
-                print(f"Created {k} preliminary clusters for KL analysis")
-        
-        if labels is None:
-            raise ValueError("Either provide labels or enable auto_cluster=True")
-        
         if verbose:
-            print(f"Computing KL divergence between clusters using {method}...")
-        
-        self.kl_results = kl_between_clusters(
-            self.X, labels, method=method, n_components=n_components
+            eff_dims = min(self.X.shape[1], max_dims)
+            print(f"Computing spatial histogram KL tendency "
+                  f"({self.X.shape[1]}D -> {eff_dims}D, {n_bins} bins/dim)...")
+
+        self.histogram_results = spatial_histogram_kl(
+            self.X, n_bins=n_bins, max_dims=max_dims, random_state=self.random_state
         )
-        
+
         if verbose:
-            print(f"KL divergence: {self.kl_results['kl_divergence']:.3f}")
-            print(f"Symmetric KL: {self.kl_results['symmetric_kl']:.3f}")
-            print(f"JS divergence: {self.kl_results['js_divergence']:.3f}")
-        
-        return self.kl_results
-    
+            r = self.histogram_results
+            if r['pca_reduced']:
+                print(f"PCA-reduced to {r['n_dims_used']}D "
+                      f"(explained variance: {sum(r['explained_variance_ratio']):.1%})")
+            print(f"KL(data || random): {r['kl_divergence']:.4f}")
+            print(f"Symmetric KL: {r['symmetric_kl']:.4f}")
+            print(f"JS divergence: {r['js_divergence']:.4f}")
+            print(self.interpret_histogram_tendency())
+
+        return self.histogram_results
+
+    def interpret_histogram_tendency(self) -> str:
+        """
+        Get interpretation of the spatial histogram KL tendency results.
+
+        Returns:
+            Interpretation string
+        """
+        if self.histogram_results is None:
+            return "No histogram tendency results available. Run compute_histogram_tendency() first."
+        return interpret_histogram_tendency(self.histogram_results['js_divergence'])
+
     def interpret(self) -> str:
         """
         Get interpretation of the Hopkins statistic.
@@ -398,29 +377,6 @@ class ClusteringTendency:
         if self.hopkins_value is None:
             self.compute_hopkins()
         return self.interpretation
-    
-    def interpret_kl(self) -> str:
-        """
-        Get interpretation of KL divergence results.
-        
-        Returns:
-            Interpretation string
-        """
-        if self.kl_results is None:
-            return "No KL divergence results available. Run compute_kl_divergence() first."
-        
-        js = self.kl_results['js_divergence']
-        
-        if np.isnan(js):
-            return "Insufficient data for KL divergence computation."
-        elif js > 0.3:
-            return f"Strong cluster separation (JS={js:.3f}). Clusters are well-distinguished."
-        elif js > 0.15:
-            return f"Moderate cluster separation (JS={js:.3f}). Clusters show some distinction."
-        elif js > 0.05:
-            return f"Weak cluster separation (JS={js:.3f}). Clusters overlap significantly."
-        else:
-            return f"Very weak cluster separation (JS={js:.3f}). Clusters are nearly identical."
     
     def is_clusterable(self, threshold: float = 0.6) -> bool:
         """
@@ -438,21 +394,23 @@ class ClusteringTendency:
     
     def plot(
         self,
-        figsize: Tuple[int, int] = (15, 10),
+        figsize: Tuple[int, int] = (15, 5),
         show_random: bool = True,
-        show_kl: bool = True,
-        show_heatmap: bool = True,
-        show_distribution: bool = True
+        show_histogram_kl: bool = True
     ) -> plt.Figure:
         """
-        Visualize clustering tendency with KL divergence.
+        Visualize clustering tendency: Hopkins statistic and, optionally,
+        the spatial histogram KL/JS divergence (data vs. random).
+
+        For the fuller histogram-tendency visualization (including EPMF
+        heatmaps when applicable), use plot_histogram_tendency() instead.
         
         Args:
             figsize: Figure size
-            show_random: Show random data comparison
-            show_kl: Show KL divergence visualization
-            show_heatmap: Show KL heatmap
-            show_distribution: Show KL distribution
+            show_random: Show random data comparison panel
+            show_histogram_kl: Show spatial histogram KL/JS summary panel
+                (computes it via compute_histogram_tendency() if not
+                already computed)
         
         Returns:
             Matplotlib figure
@@ -464,12 +422,8 @@ class ClusteringTendency:
         n_plots = 1  # Hopkins
         if show_random:
             n_plots += 1
-        if show_kl and self.kl_results:
+        if show_histogram_kl:
             n_plots += 1
-            if show_heatmap and self.kl_results.get('pairwise_kl'):
-                n_plots += 1
-            if show_distribution and self.kl_results.get('pairwise_kl'):
-                n_plots += 1
         
         # Create figure with subplots
         n_cols = min(3, n_plots)
@@ -524,95 +478,30 @@ class ClusteringTendency:
             ax.grid(True, alpha=0.3)
             plot_idx += 1
         
-        # Plot 3: KL summary (optional)
-        if show_kl and self.kl_results and plot_idx < len(axes):
+        # Plot 3: Spatial histogram KL/JS summary (optional)
+        if show_histogram_kl and plot_idx < len(axes):
             ax = axes[plot_idx]
             
-            kl_results = self.kl_results
+            if self.histogram_results is None:
+                self.compute_histogram_tendency(verbose=False)
+            
+            r = self.histogram_results
             metrics = ['kl_divergence', 'symmetric_kl', 'js_divergence']
-            values = [kl_results.get(m, np.nan) for m in metrics]
-            labels_metrics = ['KL Div', 'Sym KL', 'JS Div']
+            values = [r.get(m, np.nan) for m in metrics]
+            labels_metrics = ['KL(D||R)', 'Sym KL', 'JS Div']
             colors = ['#3498db', '#2ecc71', '#e74c3c']
             
             bars = ax.bar(labels_metrics, values, color=colors, alpha=0.7, edgecolor='black')
             ax.set_ylabel('Divergence Value', fontsize=12)
-            ax.set_title(f"KL Divergence Summary\n{self.interpret_kl()}", fontsize=12)
+            ax.set_title(f"Spatial Histogram KL (Data vs. Random)\n{self.interpret_histogram_tendency()}",
+                         fontsize=11)
             ax.grid(True, alpha=0.3, axis='y')
             
-            # Add value annotations
             for bar, val in zip(bars, values):
                 if not np.isnan(val):
                     ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
                            f'{val:.3f}', ha='center', va='bottom', fontsize=10)
             plot_idx += 1
-        
-        # Plot 4: KL heatmap (optional)
-        if show_heatmap and show_kl and self.kl_results and self.kl_results.get('pairwise_kl') and plot_idx < len(axes):
-            ax = axes[plot_idx]
-            
-            pairwise_kl = self.kl_results['pairwise_kl']
-            unique_labels = self.kl_results.get('unique_labels', [])
-            
-            if pairwise_kl and unique_labels:
-                n_clusters = len(unique_labels)
-                kl_matrix = np.zeros((n_clusters, n_clusters))
-                
-                for i, label_i in enumerate(unique_labels):
-                    for j, label_j in enumerate(unique_labels):
-                        if i == j:
-                            kl_matrix[i, j] = 0
-                        else:
-                            pair_key = f"{label_i}_{label_j}"
-                            if pair_key in pairwise_kl:
-                                kl_matrix[i, j] = pairwise_kl[pair_key]['symmetric_kl']
-                            else:
-                                pair_key_rev = f"{label_j}_{label_i}"
-                                if pair_key_rev in pairwise_kl:
-                                    kl_matrix[i, j] = pairwise_kl[pair_key_rev]['symmetric_kl']
-                
-                # Create heatmap
-                im = ax.imshow(kl_matrix, cmap='RdYlBu_r', 
-                              vmin=0, vmax=kl_matrix.max() if kl_matrix.max() > 0 else 1)
-                
-                ax.set_xticks(range(n_clusters))
-                ax.set_yticks(range(n_clusters))
-                ax.set_xticklabels([f'C{int(l)}' for l in unique_labels])
-                ax.set_yticklabels([f'C{int(l)}' for l in unique_labels])
-                ax.set_title("Pairwise KL Divergence\n(Between Clusters)", fontsize=12)
-                
-                # Add text annotations
-                for i in range(n_clusters):
-                    for j in range(n_clusters):
-                        text = ax.text(j, i, f'{kl_matrix[i, j]:.2f}',
-                                      ha="center", va="center",
-                                      color="white" if kl_matrix[i, j] > kl_matrix.max()/2 else "black",
-                                      fontsize=8)
-                
-                plt.colorbar(im, ax=ax, label='Symmetric KL')
-                plot_idx += 1
-        
-        # Plot 5: KL distribution (optional)
-        if show_distribution and show_kl and self.kl_results and self.kl_results.get('pairwise_kl') and plot_idx < len(axes):
-            ax = axes[plot_idx]
-            
-            pairwise_kl = self.kl_results['pairwise_kl']
-            
-            if pairwise_kl:
-                kl_values = [v['symmetric_kl'] for v in pairwise_kl.values() if not np.isnan(v['symmetric_kl'])]
-                
-                if kl_values:
-                    ax.hist(kl_values, bins=max(5, len(kl_values)), color='steelblue', 
-                           alpha=0.7, edgecolor='black')
-                    ax.axvline(np.mean(kl_values), color='red', linestyle='--', 
-                              linewidth=2, label=f"Mean: {np.mean(kl_values):.3f}")
-                    ax.axvline(np.median(kl_values), color='green', linestyle='--', 
-                              linewidth=2, label=f"Median: {np.median(kl_values):.3f}")
-                    ax.set_xlabel("Symmetric KL Divergence", fontsize=12)
-                    ax.set_ylabel("Frequency", fontsize=12)
-                    ax.set_title("Distribution of Pairwise KL Divergences", fontsize=12)
-                    ax.legend(loc='best')
-                    ax.grid(True, alpha=0.3)
-                    plot_idx += 1
         
         # Hide any unused subplots
         for ax in axes[plot_idx:]:
@@ -621,6 +510,57 @@ class ClusteringTendency:
         plt.tight_layout()
         return fig
     
+    def plot_histogram_tendency(self, figsize: Tuple[int, int] = (14, 5)) -> plt.Figure:
+        """
+        Visualize the spatial histogram clustering tendency results.
+
+        Shows: (1) a bar summary of KL/symmetric-KL/JS divergence between
+        the data's EPMF and the random EPMF, and (2) if the histogram was
+        computed on exactly 2 dimensions (either because X was 2D or was
+        PCA-reduced to 2D), side-by-side heatmaps of the two EPMFs.
+
+        Returns:
+            Matplotlib figure
+        """
+        if self.histogram_results is None:
+            self.compute_histogram_tendency()
+
+        r = self.histogram_results
+        show_heatmaps = r['n_dims_used'] == 2
+
+        n_cols = 3 if show_heatmaps else 1
+        fig, axes = plt.subplots(1, n_cols, figsize=figsize)
+        axes = np.atleast_1d(axes)
+
+        # Divergence summary bar chart
+        ax = axes[0]
+        metrics = ['kl_divergence', 'symmetric_kl', 'js_divergence']
+        labels_metrics = ['KL(D||R)', 'Symmetric KL', 'JS Div']
+        values = [r[m] for m in metrics]
+        colors = ['#3498db', '#2ecc71', '#e74c3c']
+        bars = ax.bar(labels_metrics, values, color=colors, alpha=0.8, edgecolor='black')
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f'{val:.3f}', ha='center', va='bottom', fontsize=10)
+        ax.set_ylabel('Divergence Value', fontsize=11)
+        title_dims = f"{r['n_dims_used']}D" + (" (PCA)" if r['pca_reduced'] else "")
+        ax.set_title(f"Spatial Histogram KL\nData vs. Random ({title_dims}, {r['n_bins']} bins/dim)",
+                     fontsize=11)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        if show_heatmaps:
+            vmax = max(r['epmf_data'].max(), r['epmf_random'].max())
+            im0 = axes[1].imshow(r['epmf_data'].T, origin='lower', cmap='viridis', vmin=0, vmax=vmax)
+            axes[1].set_title("Actual Data EPMF", fontsize=11)
+            plt.colorbar(im0, ax=axes[1], fraction=0.046)
+
+            im1 = axes[2].imshow(r['epmf_random'].T, origin='lower', cmap='viridis', vmin=0, vmax=vmax)
+            axes[2].set_title("Random Data EPMF", fontsize=11)
+            plt.colorbar(im1, ax=axes[2], fraction=0.046)
+
+        plt.tight_layout()
+        return fig
+
     def get_report(self) -> str:
         """
         Get a formatted report of clustering tendency.
@@ -645,18 +585,19 @@ Interpretation: {self.interpretation}
 Clusterability: {'YES' if self.is_clusterable() else 'NO'}
 """
         
-        if self.kl_results:
+        if self.histogram_results:
+            r = self.histogram_results
             report += f"""
 {"-"*70}
-KL Divergence Analysis:
-  Method: {self.kl_results['method']}
-  Number of clusters: {self.kl_results['n_clusters']}
-  Mean KL Divergence: {self.kl_results['kl_divergence']:.4f}
-  Mean Symmetric KL: {self.kl_results['symmetric_kl']:.4f}
-  Jensen-Shannon Divergence: {self.kl_results['js_divergence']:.4f}
-  KL Interpretation: {self.interpret_kl()}
+Spatial Histogram KL Analysis (Data vs. Random, no clustering required):
+  Dimensions used: {r['n_dims_used']} of {r['n_dims_original']} ({'PCA-reduced' if r['pca_reduced'] else 'original'})
+  Bins per dimension: {r['n_bins']}
+  KL(data || random): {r['kl_divergence']:.4f}
+  Symmetric KL: {r['symmetric_kl']:.4f}
+  Jensen-Shannon Divergence: {r['js_divergence']:.4f}
+  Interpretation: {self.interpret_histogram_tendency()}
 """
-        
+
         report += f"""
 {"-"*70}
 Recommendation:
@@ -666,15 +607,15 @@ Recommendation:
         return report
     
     def _get_recommendation(self) -> str:
-        """Get recommendation based on Hopkins statistic and KL results."""
-        has_kl = self.kl_results is not None
-        js = self.kl_results.get('js_divergence', 0) if has_kl else 0
+        """Get recommendation based on Hopkins statistic and histogram KL results."""
+        has_hist = self.histogram_results is not None
+        js = self.histogram_results.get('js_divergence', 0) if has_hist else 0
         
-        if self.hopkins_value > 0.7 and (not has_kl or js > 0.15):
+        if self.hopkins_value > 0.7 and (not has_hist or js > 0.15):
             return "Data is strongly clusterable. Proceed with full clustering analysis."
-        elif self.hopkins_value > 0.6 and (not has_kl or js > 0.1):
+        elif self.hopkins_value > 0.6 and (not has_hist or js > 0.1):
             return "Data has moderate clustering structure. Clustering may be useful."
-        elif self.hopkins_value > 0.5 and (not has_kl or js > 0.05):
+        elif self.hopkins_value > 0.5 and (not has_hist or js > 0.05):
             return "Data has weak clustering tendency. Consider feature engineering or dimensionality reduction."
         else:
             return "Data appears random or uniformly distributed. Clustering may not be meaningful."
@@ -708,39 +649,6 @@ def assess_clustering_tendency(
     return H, interpretation, tendency
 
 
-def compute_kl_for_clustering(
-    X: np.ndarray,
-    labels: np.ndarray,
-    method: str = 'gmm',
-    n_components: int = 10,
-    verbose: bool = True
-) -> Dict[str, Any]:
-    """
-    Convenience function to compute KL divergence between clusters.
-    
-    Args:
-        X: Data points
-        labels: Cluster labels
-        method: 'gmm' or 'histogram'
-        n_components: Number of components/bins
-        verbose: Print progress
-    
-    Returns:
-        Dictionary with KL divergence results
-    """
-    if verbose:
-        print(f"Computing KL divergence between clusters using {method}...")
-    
-    results = kl_between_clusters(X, labels, method=method, n_components=n_components)
-    
-    if verbose:
-        print(f"Mean KL Divergence: {results['kl_divergence']:.4f}")
-        print(f"Symmetric KL: {results['symmetric_kl']:.4f}")
-        print(f"JS Divergence: {results['js_divergence']:.4f}")
-    
-    return results
-
-
 # ============================================================================
 # Testing
 # ============================================================================
@@ -759,13 +667,15 @@ if __name__ == "__main__":
     tendency_blobs = ClusteringTendency(X_blobs, verbose=True)
     H_blobs = tendency_blobs.compute_hopkins()
     
-    # Auto-compute KL with clustering
-    kl_results = tendency_blobs.compute_kl_divergence(k=3, auto_cluster=True)
+    # Spatial histogram KL tendency (data vs. random)
+    hist_results = tendency_blobs.compute_histogram_tendency(n_bins=5, max_dims=3)
     
     print(tendency_blobs.get_report())
     
     # Plot with all visualizations
-    fig = tendency_blobs.plot(show_kl=True, show_heatmap=True, show_distribution=True)
+    fig = tendency_blobs.plot(show_random=True, show_histogram_kl=True)
+    plt.show()
+    fig2 = tendency_blobs.plot_histogram_tendency()
     plt.show()
     
     print("\nAll tests passed!")
