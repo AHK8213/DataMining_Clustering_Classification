@@ -523,19 +523,19 @@ class ClusteringComparator:
         
         # Define algorithms for nonlinear detection
         nonlinear_algos = {
-            'K-Means': lambda: self._get_clustering_fn('K-Means'),
-            'Bisecting K-Means': lambda: self._get_clustering_fn('Bisecting K-Means'),
-            'DBSCAN': lambda: self._get_clustering_fn('DBSCAN'),
-            'OPTICS': lambda: self._get_clustering_fn('OPTICS'),
-            'HDBSCAN': lambda: self._get_clustering_fn('HDBSCAN'),
-            'Gaussian Mixture': lambda: self._get_clustering_fn('Gaussian Mixture'),
-            'K-Medoids': lambda: self._get_clustering_fn('K-Medoids'),
-            'K-Median': lambda: self._get_clustering_fn('K-Median'),
-            'Fuzzy C-Means': lambda: self._get_clustering_fn('Fuzzy C-Means'),
-            'Kernel K-Means': lambda: self._get_clustering_fn('Kernel K-Means'),
-            'Agglomerative (Ward)': lambda: self._get_clustering_fn('Agglomerative (Ward)'),
-            'Agglomerative (Single)': lambda: self._get_clustering_fn('Agglomerative (Single)'),
-            'Agglomerative (Complete)': lambda: self._get_clustering_fn('Agglomerative (Complete)'),
+            'K-Means': lambda: self._get_clustering_fn('K-Means')(X_moons),
+            'Bisecting K-Means': lambda: self._get_clustering_fn('Bisecting K-Means')(X_moons),
+            'DBSCAN': lambda: self._get_clustering_fn('DBSCAN')(X_moons),
+            'OPTICS': lambda: self._get_clustering_fn('OPTICS')(X_moons),
+            'HDBSCAN': lambda: self._get_clustering_fn('HDBSCAN')(X_moons),
+            'Gaussian Mixture': lambda: self._get_clustering_fn('Gaussian Mixture')(X_moons),
+            'K-Medoids': lambda: self._get_clustering_fn('K-Medoids')(X_moons),
+            'K-Median': lambda: self._get_clustering_fn('K-Median')(X_moons),
+            'Fuzzy C-Means': lambda: self._get_clustering_fn('Fuzzy C-Means')(X_moons),
+            'Kernel K-Means': lambda: self._get_clustering_fn('Kernel K-Means')(X_moons),
+            'Agglomerative (Ward)': lambda: self._get_clustering_fn('Agglomerative (Ward)')(X_moons),
+            'Agglomerative (Single)': lambda: self._get_clustering_fn('Agglomerative (Single)')(X_moons),
+            'Agglomerative (Complete)': lambda: self._get_clustering_fn('Agglomerative (Complete)')(X_moons),
             'MeanShift': lambda: MeanShift(bandwidth=bandwidth).fit_predict(X_moons),
         }
         
