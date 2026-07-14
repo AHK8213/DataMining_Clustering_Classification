@@ -338,7 +338,8 @@ class ClusteringTendency:
         k: Optional[int] = None,
         method: str = 'gmm',
         n_components: int = 10,
-        auto_cluster: bool = True
+        auto_cluster: bool = True,
+        verbose: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Compute KL divergence between clusters.
@@ -349,12 +350,16 @@ class ClusteringTendency:
             method: 'gmm' or 'histogram'
             n_components: Number of components/bins
             auto_cluster: If True and labels is None, run KMeans automatically
+            verbose: Print progress. Defaults to the instance's verbose
+                setting (set at __init__) when not given.
         
         Returns:
             Dictionary with KL divergence results
         """
+        verbose = self.verbose if verbose is None else verbose
+
         if labels is None and auto_cluster:
-            if self.verbose:
+            if verbose:
                 print("Auto-clustering for KL divergence analysis...")
             
             # Use K=3 as default or specified k
@@ -363,20 +368,20 @@ class ClusteringTendency:
             labels = kmeans.fit_predict(self.X)
             self.prelim_labels = labels
             
-            if self.verbose:
+            if verbose:
                 print(f"Created {k} preliminary clusters for KL analysis")
         
         if labels is None:
             raise ValueError("Either provide labels or enable auto_cluster=True")
         
-        if self.verbose:
+        if verbose:
             print(f"Computing KL divergence between clusters using {method}...")
         
         self.kl_results = kl_between_clusters(
             self.X, labels, method=method, n_components=n_components
         )
         
-        if self.verbose:
+        if verbose:
             print(f"KL divergence: {self.kl_results['kl_divergence']:.3f}")
             print(f"Symmetric KL: {self.kl_results['symmetric_kl']:.3f}")
             print(f"JS divergence: {self.kl_results['js_divergence']:.3f}")
