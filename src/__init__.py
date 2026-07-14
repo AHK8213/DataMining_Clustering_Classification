@@ -7,7 +7,11 @@ comprehensive evaluation.
 
 Modules:
     - config: Centralized configuration and constants
-    - utils: Helper functions for memory, sampling, metrics
+    - utils: Helper functions for memory, metrics
+    - sampling: Unified sampling manager (random sampling, algorithm-aware
+      subsampling, tiered datasets) - single source of truth for sampling
+    - caching: Disk caching for expensive intermediate results (PCA,
+      optimal K, clustering labels)
     - data_preparation: Data loading, cleaning, feature engineering, PCA
     - clustering_algorithms: All clustering algorithm implementations
     - clustering_evaluation: Metrics, comparison, holistic selection
@@ -165,17 +169,24 @@ from src.classification_analysis import (
 from src.visualization import (
     create_figure,
     save_figure,
+    save_all_figures,
     plot_cluster_pca,
-    plot_dendrogram,
-    plot_elbow,
-    plot_silhouette_scores,
-    plot_roc_curves,
-    plot_precision_recall_curves,
-    plot_confusion_matrices,
     plot_model_comparison,
     plot_training_history,
     plot_feature_importance,
 )
+
+# Sampling (unified sampling manager)
+from src.sampling import (
+    UnifiedSampler,
+    SamplingStrategy,
+    SubsamplingConfig,
+    ALGORITHM_LIMITS,
+    create_tiered_datasets,
+)
+
+# Caching
+from src.caching import cache_result, clear_cache
 
 # Final Summary
 from src.final_summary import (
@@ -279,16 +290,22 @@ __all__ = [
     # Visualization
     'create_figure',
     'save_figure',
+    'save_all_figures',
     'plot_cluster_pca',
-    'plot_dendrogram',
-    'plot_elbow',
-    'plot_silhouette_scores',
-    'plot_roc_curves',
-    'plot_precision_recall_curves',
-    'plot_confusion_matrices',
     'plot_model_comparison',
     'plot_training_history',
     'plot_feature_importance',
+
+    # Sampling
+    'UnifiedSampler',
+    'SamplingStrategy',
+    'SubsamplingConfig',
+    'ALGORITHM_LIMITS',
+    'create_tiered_datasets',
+
+    # Caching
+    'cache_result',
+    'clear_cache',
     
     # Final Summary
     'create_clustering_final_table',

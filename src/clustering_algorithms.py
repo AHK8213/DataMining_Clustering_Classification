@@ -45,24 +45,14 @@ warnings.filterwarnings("ignore")
 # ============================================================================
 # Subsampling Configuration
 # ============================================================================
+# NOTE: the per-algorithm limits and the subsampling logic itself now live
+# in src/sampling.py (UnifiedSampler / ALGORITHM_LIMITS), which is the
+# single source of truth. The names below are kept as aliases so existing
+# `from src.clustering_algorithms import SUBSAMPLE_LIMITS` imports and any
+# code that edits limits here keep working unchanged.
 
-SUBSAMPLE_LIMITS = {
-    'kernel_kmeans': 8000,
-    'agglomerative_ward': 15000,
-    'agglomerative_single': 15000,
-    'agglomerative_complete': 15000,
-    'kmedoids': 10000,
-    'gmm': None,
-    'dbscan': None,
-    'optics': None,
-    'hdbscan': None,
-    'kmeans': None,
-    'bisecting_kmeans': None,
-    'kmedian': None,
-    'fuzzy_cmeans': None,
-}
-
-DEFAULT_SUBSAMPLE_LIMIT = 20000
+from src.sampling import ALGORITHM_LIMITS as SUBSAMPLE_LIMITS
+from src.sampling import DEFAULT_ALGORITHM_LIMIT as DEFAULT_SUBSAMPLE_LIMIT
 
 
 # ============================================================================
@@ -88,22 +78,6 @@ def get_k_distance_eps(
     return eps, k_distances
 
 
-def plot_k_distance(
-    k_distances: np.ndarray,
-    figsize: Tuple[int, int] = (8, 5)
-):
-    """Plot k-distance plot for DBSCAN eps selection."""
-    import matplotlib.pyplot as plt
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    ax.plot(k_distances)
-    ax.set_title("K-distance plot")
-    ax.set_xlabel("Points sorted by distance")
-    ax.set_ylabel("k-NN distance")
-    ax.grid(True, alpha=0.3)
-    return fig
-
-
 def auto_subsample(
     X: np.ndarray,
     algorithm_name: str,
@@ -112,7 +86,10 @@ def auto_subsample(
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Subsample data for memory-intensive algorithms.
-    
+
+    Thin wrapper around src.sampling.default_sampler.auto_subsample,
+    kept here for backward compatibility with existing imports.
+
     Args:
         X: Full dataset
         algorithm_name: Name of the algorithm
@@ -122,22 +99,11 @@ def auto_subsample(
     Returns:
         Tuple of (subsampled_X, indices_used or None)
     """
-    n = X.shape[0]
-    
-    if max_samples is None:
-        max_samples = SUBSAMPLE_LIMITS.get(algorithm_name, DEFAULT_SUBSAMPLE_LIMIT)
-    
-    if max_samples is None or n <= max_samples:
-        return X, None
-    
-    rng = get_rng(random_state)
-    indices = rng.choice(n, max_samples, replace=False)
-    X_subsampled = X[indices]
-    
-    if VERBOSE:
-        print(f"  ⚡ {algorithm_name}: subsampled from {n:,} to {max_samples:,} points")
-    
-    return X_subsampled, indices
+    from src.sampling import default_sampler
+    return default_sampler.auto_subsample(
+        X, algorithm_name, max_samples=max_samples,
+        random_state=random_state, verbose=VERBOSE
+    )
 
 
 # ============================================================================

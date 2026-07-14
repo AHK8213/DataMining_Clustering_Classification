@@ -16,12 +16,9 @@ from typing import Tuple, Optional, Dict, Any, List
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.feature_selection import mutual_info_classif
 
 # Import configuration and utilities
 from src.config import (
@@ -216,106 +213,9 @@ def engineer_features(
     return df_eng
 
 
-def remove_highly_correlated_features(
-    df: pd.DataFrame,
-    num_cols: List[str],
-    threshold: float = 0.8,
-    verbose: bool = VERBOSE
-) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Remove highly correlated features (> threshold).
-    
-    Args:
-        df: Input DataFrame
-        num_cols: List of numeric columns to check
-        threshold: Correlation threshold
-        verbose: Print progress
-    
-    Returns:
-        Tuple of (DataFrame with removed columns, list of removed columns)
-    """
-    corr = df[num_cols].corr()
-    high_corr_pairs = []
-    
-    for i, c1 in enumerate(corr.columns):
-        for c2 in corr.columns[i+1:]:
-            if abs(corr.loc[c1, c2]) > threshold:
-                high_corr_pairs.append((c1, c2, corr.loc[c1, c2]))
-    
-    if high_corr_pairs and verbose:
-        print(f"Highly correlated feature pairs (> {threshold}):")
-        for c1, c2, val in high_corr_pairs:
-            print(f"  {c1} - {c2}: {val:.3f}")
-    
-    # Drop the second column of each pair (keeping the first)
-    cols_to_drop = [c2 for _, c2, _ in high_corr_pairs]
-    if cols_to_drop:
-        df = df.drop(columns=list(set(cols_to_drop)))
-        if verbose:
-            print(f"Dropped columns: {list(set(cols_to_drop))}")
-    
-    return df, cols_to_drop
-
-
 # ============================================================================
 # Feature Selection
 # ============================================================================
-
-def compute_feature_importance(
-    df: pd.DataFrame,
-    preprocessor: ColumnTransformer,
-    target_col: str = TARGET_COL,
-    n_estimators: int = 200,
-    random_state: int = RANDOM_STATE,
-    verbose: bool = VERBOSE
-) -> Tuple[pd.Series, pd.Series]:
-    """
-    Compute feature importance using Random Forest and Mutual Information.
-    
-    Args:
-        df: Input DataFrame
-        preprocessor: Preprocessing pipeline
-        target_col: Target column name
-        n_estimators: Number of trees for Random Forest
-        random_state: Random seed
-        verbose: Print progress
-    
-    Returns:
-        Tuple of (RF importances, MI scores)
-    """
-    # Prepare data
-    df_clf = df[df[target_col] != 'unknown'].copy()
-    df_clf[target_col] = (df_clf[target_col] == 'yes').astype(int)
-    
-    X = preprocessor.fit_transform(df_clf.drop(columns=[target_col])).astype(np.float64)
-    y = df_clf[target_col].values
-    
-    # Random Forest importance
-    if verbose:
-        print("Computing Random Forest feature importance...")
-    rf = RandomForestClassifier(
-        n_estimators=n_estimators,
-        random_state=random_state,
-        class_weight='balanced',
-        n_jobs=-1
-    )
-    rf.fit(X, y)
-    rf_importances = pd.Series(
-        rf.feature_importances_,
-        index=preprocessor.get_feature_names_out()
-    ).sort_values(ascending=False)
-    
-    # Mutual Information
-    if verbose:
-        print("Computing Mutual Information scores...")
-    mi_scores = mutual_info_classif(X, y, random_state=random_state)
-    mi_importances = pd.Series(
-        mi_scores,
-        index=preprocessor.get_feature_names_out()
-    ).sort_values(ascending=False)
-    
-    return rf_importances, mi_importances
-
 
 def get_combined_feature_ranking(
     rf_importances: pd.Series,
@@ -578,80 +478,6 @@ def prepare_data_for_classification(
     preprocessor = create_preprocessor(num_cols, cat_cols)
     
     return X_train, y_train, X_test, y_test, preprocessor
-
-
-# ============================================================================
-# Visualization Helpers
-# ============================================================================
-
-def plot_distributions(
-    df: pd.DataFrame,
-    num_cols: List[str],
-    figsize: Tuple[int, int] = (15, 8)
-) -> plt.Figure:
-    """
-    Plot distributions of numeric columns.
-    
-    Args:
-        df: Input DataFrame
-        num_cols: List of numeric columns
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    n_cols = min(3, len(num_cols))
-    n_rows = int(np.ceil(len(num_cols) / n_cols))
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    axes = np.array(axes).flatten()
-    
-    for ax, col in zip(axes, num_cols):
-        sns.histplot(df[col], kde=True, ax=ax)
-        ax.set_title(col)
-        ax.set_xlabel('')
-    
-    # Hide unused subplots
-    for ax in axes[len(num_cols):]:
-        ax.axis('off')
-    
-    plt.tight_layout()
-    return fig
-
-
-def plot_target_distribution(
-    df: pd.DataFrame,
-    target_col: str = TARGET_COL,
-    figsize: Tuple[int, int] = (6, 4)
-) -> plt.Figure:
-    """
-    Plot the distribution of the target variable.
-    
-    Args:
-        df: Input DataFrame
-        target_col: Target column name
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    # Filter unknown
-    df_plot = df[df[target_col] != 'unknown']
-    
-    colors = ['#4C72B0', '#DD8452']
-    df_plot[target_col].value_counts().plot(kind='bar', ax=ax, color=colors)
-    ax.set_title(f"Target '{target_col}' distribution")
-    ax.set_xlabel('')
-    ax.set_ylabel('Count')
-    
-    # Add percentage labels
-    total = len(df_plot)
-    for i, v in enumerate(df_plot[target_col].value_counts().values):
-        ax.text(i, v + total*0.01, f'{v/total:.1%}', ha='center')
-    
-    return fig
 
 
 # ============================================================================

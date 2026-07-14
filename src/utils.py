@@ -83,6 +83,10 @@ def reduce_memory(df: pd.DataFrame, verbose: bool = VERBOSE) -> pd.DataFrame:
 # ============================================================================
 # Sampling
 # ============================================================================
+# NOTE: The actual sampling logic now lives in src/sampling.py
+# (UnifiedSampler). These two functions are kept as thin backward-compatible
+# wrappers so existing `from src.utils import get_sample` imports keep
+# working unchanged.
 
 def get_sample(
     X: np.ndarray,
@@ -100,12 +104,8 @@ def get_sample(
     Returns:
         Tuple of (sampled data, indices)
     """
-    if n >= X.shape[0]:
-        return X, np.arange(X.shape[0])
-    
-    rng = get_rng(random_state)
-    idx = rng.choice(X.shape[0], n, replace=False)
-    return X[idx], idx
+    from src.sampling import default_sampler, SamplingStrategy
+    return default_sampler.get_sample(X, n, SamplingStrategy.RANDOM, random_state)
 
 
 def get_sample_df(
@@ -124,12 +124,8 @@ def get_sample_df(
     Returns:
         Tuple of (sampled DataFrame, indices)
     """
-    if n >= len(df):
-        return df, np.arange(len(df))
-    
-    rng = get_rng(random_state)
-    idx = rng.choice(len(df), n, replace=False)
-    return df.iloc[idx].reset_index(drop=True), idx
+    from src.sampling import default_sampler, SamplingStrategy
+    return default_sampler.get_sample(df, n, SamplingStrategy.RANDOM, random_state)
 
 
 # ============================================================================

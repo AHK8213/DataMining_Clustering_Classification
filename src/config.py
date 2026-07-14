@@ -17,10 +17,15 @@ DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 FIGURES_DIR = PROJECT_ROOT / "figures"
 REPORTS_DIR = PROJECT_ROOT / "reports"
+CACHE_DIR = DATA_DIR / "cache"
 
 # Create directories if they don't exist
-for dir_path in [DATA_DIR, OUTPUT_DIR, FIGURES_DIR, REPORTS_DIR]:
+for dir_path in [DATA_DIR, OUTPUT_DIR, FIGURES_DIR, REPORTS_DIR, CACHE_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
+
+# Set to True to ignore any existing cache and recompute everything
+# (useful when the data or feature engineering changes)
+DISABLE_CACHE = False
 
 # ============================================================================
 # Data Source

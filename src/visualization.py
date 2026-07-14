@@ -75,6 +75,42 @@ def save_figure(
     plt.close(fig)
 
 
+def save_all_figures(
+    figures: Dict[str, plt.Figure],
+    prefix: str = "",
+    subdir: str = "",
+    dpi: int = FIGURE_DPI,
+) -> List[str]:
+    """
+    Save several figures at once into FIGURES_DIR, organized by section.
+
+    Args:
+        figures: Mapping of {name: matplotlib Figure}
+        prefix: Optional filename prefix, e.g. "clustering"
+        subdir: Optional subfolder under FIGURES_DIR, e.g. "optimal_k"
+        dpi: DPI for saving
+
+    Returns:
+        List of the file paths written, e.g.:
+        save_all_figures({'hopkins_plot': fig}, subdir='clustering_tendency')
+        -> figures/clustering_tendency/hopkins_plot.png
+    """
+    from src.config import FIGURES_DIR
+
+    out_dir = FIGURES_DIR / subdir if subdir else FIGURES_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written = []
+    for name, fig in figures.items():
+        fname = f"{prefix}_{name}.png" if prefix else f"{name}.png"
+        path = out_dir / fname
+        fig.savefig(path, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+        written.append(str(path))
+
+    return written
+
+
 # ============================================================================
 # Clustering Visualizations
 # ============================================================================
@@ -150,238 +186,9 @@ def plot_cluster_pca(
     return fig
 
 
-def plot_dendrogram(
-    linkage_matrix: np.ndarray,
-    title: str = "Dendrogram",
-    figsize: Tuple[int, int] = (14, 6),
-    truncate_mode: str = 'lastp',
-    p: int = 30,
-    color_threshold: float = None
-) -> plt.Figure:
-    """
-    Plot dendrogram.
-    
-    Args:
-        linkage_matrix: Linkage matrix from scipy.cluster.hierarchy.linkage
-        title: Plot title
-        figsize: Figure size
-        truncate_mode: Truncation mode
-        p: Number of clusters to show
-        color_threshold: Color threshold
-    
-    Returns:
-        Matplotlib figure
-    """
-    from scipy.cluster.hierarchy import dendrogram
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    dendrogram(
-        linkage_matrix,
-        ax=ax,
-        truncate_mode=truncate_mode,
-        p=p,
-        color_threshold=color_threshold,
-        above_threshold_color='gray'
-    )
-    
-    ax.set_xlabel("Sample Index / (Cluster Size)", fontsize=12)
-    ax.set_ylabel("Distance", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    
-    return fig
-
-
-def plot_elbow(
-    k_values: List[int],
-    sse: List[float],
-    best_k: Optional[int] = None,
-    title: str = "Elbow Method",
-    figsize: Tuple[int, int] = (8, 5)
-) -> plt.Figure:
-    """
-    Plot elbow curve.
-    
-    Args:
-        k_values: K values
-        sse: SSE values
-        best_k: Optimal K (optional)
-        title: Plot title
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    ax.plot(k_values, sse, marker='o', linewidth=2, color=COLORS['primary'])
-    
-    if best_k:
-        ax.axvline(best_k, color=COLORS['danger'], linestyle='--', alpha=0.7,
-                   label=f'Optimal K = {best_k}')
-        ax.legend()
-    
-    ax.set_xlabel("Number of Clusters (K)", fontsize=12)
-    ax.set_ylabel("SSE (Within-Cluster Sum of Squares)", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    
-    return fig
-
-
-def plot_silhouette_scores(
-    k_values: List[int],
-    scores: List[float],
-    best_k: Optional[int] = None,
-    title: str = "Silhouette Scores",
-    figsize: Tuple[int, int] = (8, 5)
-) -> plt.Figure:
-    """
-    Plot silhouette scores.
-    
-    Args:
-        k_values: K values
-        scores: Silhouette scores
-        best_k: Optimal K (optional)
-        title: Plot title
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    ax.plot(k_values, scores, marker='o', linewidth=2, color=COLORS['secondary'])
-    
-    if best_k:
-        ax.axvline(best_k, color=COLORS['danger'], linestyle='--', alpha=0.7,
-                   label=f'Optimal K = {best_k}')
-        ax.legend()
-    
-    ax.set_xlabel("Number of Clusters (K)", fontsize=12)
-    ax.set_ylabel("Silhouette Score", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    ax.set_ylim(0, 1)
-    
-    return fig
-
-
 # ============================================================================
 # Classification Visualizations
 # ============================================================================
-
-def plot_roc_curves(
-    y_true: np.ndarray,
-    y_probas: Dict[str, np.ndarray],
-    title: str = "ROC Curves",
-    figsize: Tuple[int, int] = (8, 6)
-) -> plt.Figure:
-    """
-    Plot multiple ROC curves.
-    
-    Args:
-        y_true: True labels
-        y_probas: Dictionary mapping model names to probabilities
-        title: Plot title
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    from sklearn.metrics import roc_curve, roc_auc_score
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    for name, y_proba in y_probas.items():
-        fpr, tpr, _ = roc_curve(y_true, y_proba)
-        auc = roc_auc_score(y_true, y_proba)
-        ax.plot(fpr, tpr, linewidth=2, label=f"{name} (AUC={auc:.3f})")
-    
-    ax.plot([0, 1], [0, 1], 'k--', alpha=0.4, label='Random (AUC=0.5)')
-    ax.set_xlabel("False Positive Rate", fontsize=12)
-    ax.set_ylabel("True Positive Rate", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    ax.legend(loc='lower right', fontsize=10)
-    
-    return fig
-
-
-def plot_precision_recall_curves(
-    y_true: np.ndarray,
-    y_probas: Dict[str, np.ndarray],
-    title: str = "Precision-Recall Curves",
-    figsize: Tuple[int, int] = (8, 6)
-) -> plt.Figure:
-    """
-    Plot multiple Precision-Recall curves.
-    
-    Args:
-        y_true: True labels
-        y_probas: Dictionary mapping model names to probabilities
-        title: Plot title
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    from sklearn.metrics import precision_recall_curve, average_precision_score
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    for name, y_proba in y_probas.items():
-        precision, recall, _ = precision_recall_curve(y_true, y_proba)
-        ap = average_precision_score(y_true, y_proba)
-        ax.plot(recall, precision, linewidth=2, label=f"{name} (AP={ap:.3f})")
-    
-    ax.set_xlabel("Recall", fontsize=12)
-    ax.set_ylabel("Precision", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    ax.legend(loc='lower left', fontsize=10)
-    
-    return fig
-
-
-def plot_confusion_matrices(
-    y_true: np.ndarray,
-    y_preds: Dict[str, np.ndarray],
-    labels: List[str] = ['no', 'yes'],
-    title: str = "Confusion Matrices",
-    figsize: Tuple[int, int] = None
-) -> plt.Figure:
-    """
-    Plot multiple confusion matrices.
-    
-    Args:
-        y_true: True labels
-        y_preds: Dictionary mapping model names to predictions
-        labels: Label names
-        title: Plot title
-        figsize: Figure size
-    
-    Returns:
-        Matplotlib figure
-    """
-    from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-    
-    n_models = len(y_preds)
-    if figsize is None:
-        figsize = (4 * n_models, 4)
-    
-    fig, axes = plt.subplots(1, n_models, figsize=figsize)
-    if n_models == 1:
-        axes = [axes]
-    
-    for ax, (name, y_pred) in zip(axes, y_preds.items()):
-        ConfusionMatrixDisplay(
-            confusion_matrix(y_true, y_pred),
-            display_labels=labels
-        ).plot(ax=ax, colorbar=False)
-        ax.set_title(name, fontsize=10)
-    
-    plt.suptitle(title, fontsize=14, y=1.02)
-    plt.tight_layout()
-    
-    return fig
-
 
 def plot_feature_importance(
     importance: pd.Series,
@@ -506,100 +313,6 @@ def plot_training_history(
 
 
 # ============================================================================
-# Distribution Visualizations
-# ============================================================================
-
-def plot_distributions(
-    df: pd.DataFrame,
-    columns: List[str],
-    kind: str = 'hist',
-    figsize: Tuple[int, int] = (15, 8),
-    n_cols: int = 3
-) -> plt.Figure:
-    """
-    Plot distributions of multiple columns.
-    
-    Args:
-        df: DataFrame
-        columns: Columns to plot
-        kind: 'hist' or 'box'
-        figsize: Figure size
-        n_cols: Number of columns in subplot grid
-    
-    Returns:
-        Matplotlib figure
-    """
-    n_rows = int(np.ceil(len(columns) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    axes = np.array(axes).flatten()
-    
-    for ax, col in zip(axes, columns):
-        if kind == 'hist':
-            df[col].hist(ax=ax, bins=30, alpha=0.7, color=COLORS['primary'])
-            ax.axvline(df[col].mean(), color=COLORS['danger'], linestyle='--', 
-                       alpha=0.7, label='Mean')
-            ax.axvline(df[col].median(), color=COLORS['success'], linestyle='--', 
-                       alpha=0.7, label='Median')
-            ax.legend()
-        else:
-            df.boxplot(column=col, ax=ax)
-        
-        ax.set_title(col, fontsize=10)
-        ax.set_xlabel('')
-    
-    # Hide unused subplots
-    for ax in axes[len(columns):]:
-        ax.axis('off')
-    
-    plt.tight_layout()
-    return fig
-
-
-def plot_correlation_heatmap(
-    df: pd.DataFrame,
-    columns: List[str],
-    title: str = "Correlation Matrix",
-    figsize: Tuple[int, int] = (8, 6),
-    annot: bool = True,
-    cmap: str = 'coolwarm'
-) -> plt.Figure:
-    """
-    Plot correlation heatmap.
-    
-    Args:
-        df: DataFrame
-        columns: Columns to include
-        title: Plot title
-        figsize: Figure size
-        annot: Show correlation values
-        cmap: Colormap
-    
-    Returns:
-        Matplotlib figure
-    """
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    corr = df[columns].corr()
-    
-    sns.heatmap(
-        corr,
-        ax=ax,
-        annot=annot,
-        fmt='.2f',
-        cmap=cmap,
-        vmin=-1,
-        vmax=1,
-        square=True,
-        cbar_kws={'label': 'Correlation'}
-    )
-    
-    ax.set_title(title, fontsize=14)
-    
-    plt.tight_layout()
-    return fig
-
-
-# ============================================================================
 # Testing
 # ============================================================================
 
@@ -637,7 +350,15 @@ if __name__ == "__main__":
     y_pred = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
     
-    fig = plot_roc_curves(y_test, {'Logistic Regression': y_proba})
+    importances = pd.Series(
+        np.abs(model.coef_[0]), index=['f0', 'f1', 'f2', 'f3']
+    ).sort_values(ascending=False)
+    fig = plot_feature_importance(importances, title="Test Importances")
     plt.show()
-    
+
+    # Test batch figure saving
+    print("\n3. Testing save_all_figures:")
+    saved = save_all_figures({'test_pca': fig}, subdir='_smoke_test')
+    print(f"Saved: {saved}")
+
     print("\nAll tests passed!")
