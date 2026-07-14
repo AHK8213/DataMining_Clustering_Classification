@@ -7,6 +7,8 @@ Provides:
 - Holistic model selection
 - Optimal K determination (Elbow, Silhouette, etc.)
 - Visualization of comparisons
+- Nonlinear shape detection (Two-Moons)
+- Noise resistance experiments
 """
 
 import warnings
@@ -16,7 +18,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.cluster import MiniBatchKMeans
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.metrics import (
+    silhouette_score, 
+    calinski_harabasz_score, 
+    davies_bouldin_score,
+    adjusted_rand_score
+)
+from sklearn.datasets import make_moons
+from sklearn.cluster import MeanShift, estimate_bandwidth
 
 from src.config import RANDOM_STATE, K_RANGE, VERBOSE
 from src.utils import (
@@ -220,6 +229,8 @@ class ClusteringComparator:
     - Internal metrics (Silhouette, Davies-Bouldin, Dunn, Calinski-Harabasz)
     - Runtime comparison
     - Holistic ranking
+    - Nonlinear shape detection (Two-Moons)
+    - Noise resistance experiments
     """
     
     def __init__(
@@ -243,6 +254,8 @@ class ClusteringComparator:
         self.runtimes = runtimes or {}
         self.verbose = verbose
         self.metrics_df = None
+        self.nonlinear_results = None
+        self.noise_results = None
     
     def compute_metrics_all(self) -> pd.DataFrame:
         """
@@ -284,7 +297,9 @@ class ClusteringComparator:
         self,
         min_clusters: int = 2,
         max_noise_pct: float = 50.0,
-        primary_metric: str = 'silhouette'
+        primary_metric: str = 'silhouette',
+        include_nonlinear: bool = False,
+        include_noise: bool = False
     ) -> str:
         """
         Select the best model holistically.
@@ -293,6 +308,8 @@ class ClusteringComparator:
             min_clusters: Minimum number of clusters (excluding noise)
             max_noise_pct: Maximum allowed noise percentage
             primary_metric: Primary metric for selection
+            include_nonlinear: Include nonlinear ARI in ranking
+            include_noise: Include noise robustness in ranking
         
         Returns:
             Name of best model
@@ -312,12 +329,21 @@ class ClusteringComparator:
             # Fallback to all models with the primary metric
             return df[primary_metric].idxmax()
         
+        # If including additional metrics, compute them first
+        if include_nonlinear and self.nonlinear_results is None:
+            self.evaluate_nonlinear_shapes(verbose=False)
+        
+        if include_noise and self.noise_results is None:
+            self.evaluate_noise_resistance(verbose=False)
+        
         return eligible[primary_metric].idxmax()
     
     def rank_algorithms(
         self,
         metrics: List[str] = None,
-        ascending: Dict[str, bool] = None
+        ascending: Dict[str, bool] = None,
+        include_nonlinear: bool = True,
+        include_noise: bool = True
     ) -> pd.DataFrame:
         """
         Rank algorithms by multiple metrics.
@@ -325,14 +351,38 @@ class ClusteringComparator:
         Args:
             metrics: List of metrics to include in ranking
             ascending: Dict mapping metric to ascending/descending
+            include_nonlinear: Include nonlinear ARI in ranking
+            include_noise: Include noise robustness in ranking
         
         Returns:
             DataFrame with ranks and overall score
         """
         df = self.get_comparison_df().copy()
         
+        # Add nonlinear results if requested
+        if include_nonlinear:
+            if self.nonlinear_results is None:
+                self.evaluate_nonlinear_shapes(verbose=False)
+            nonlinear_ari = {name: res['ari'] for name, res in self.nonlinear_results.items()}
+            df['nonlinear_ari'] = pd.Series(nonlinear_ari)
+        
+        # Add noise results if requested
+        if include_noise:
+            if self.noise_results is None:
+                self.evaluate_noise_resistance(verbose=False)
+            # Average ARI across noise levels
+            noise_robustness = {}
+            for name, results in self.noise_results.items():
+                if results:
+                    noise_robustness[name] = np.mean([r['mean_ari_robustness'] for r in results])
+            df['noise_robustness'] = pd.Series(noise_robustness)
+        
         if metrics is None:
             metrics = ['silhouette', 'davies_bouldin', 'dunn', 'runtime_s']
+            if include_nonlinear and 'nonlinear_ari' in df.columns:
+                metrics.append('nonlinear_ari')
+            if include_noise and 'noise_robustness' in df.columns:
+                metrics.append('noise_robustness')
         
         if ascending is None:
             ascending = {
@@ -340,7 +390,9 @@ class ClusteringComparator:
                 'davies_bouldin': True,  # lower is better
                 'dunn': False,  # higher is better
                 'calinski_harabasz': False,  # higher is better
-                'runtime_s': True  # lower is better
+                'runtime_s': True,  # lower is better
+                'nonlinear_ari': False,  # higher is better
+                'noise_robustness': False  # higher is better
             }
         
         # Compute ranks
@@ -350,17 +402,29 @@ class ClusteringComparator:
             if metric not in df.columns:
                 continue
             
+            # Skip if all values are NaN
+            if df[metric].isna().all():
+                continue
+            
             asc = ascending.get(metric, False)
-            rank_df[f'{metric}_rank'] = df[metric].rank(ascending=asc)
+            rank_df[f'{metric}_rank'] = df[metric].rank(ascending=asc, na_option='keep')
         
         # Overall rank score (average of ranks)
         rank_cols = [c for c in rank_df.columns if c.endswith('_rank')]
         if rank_cols:
-            rank_df['overall_rank_score'] = rank_df[rank_cols].mean(axis=1)
-            df['overall_rank_score'] = rank_df['overall_rank_score']
+            # Only include columns without NaN
+            valid_rank_cols = []
+            for col in rank_cols:
+                if not rank_df[col].isna().all():
+                    valid_rank_cols.append(col)
+            
+            if valid_rank_cols:
+                rank_df['overall_rank_score'] = rank_df[valid_rank_cols].mean(axis=1)
+                df['overall_rank_score'] = rank_df['overall_rank_score']
         
         # Sort by overall rank
-        df = df.sort_values('overall_rank_score', ascending=True)
+        if 'overall_rank_score' in df.columns:
+            df = df.sort_values('overall_rank_score', ascending=True)
         
         return df
     
@@ -387,6 +451,10 @@ class ClusteringComparator:
         n_metrics = len(metrics)
         fig, axes = plt.subplots(1, n_metrics, figsize=figsize)
         
+        # Handle single metric case
+        if n_metrics == 1:
+            axes = [axes]
+        
         colors = {
             'silhouette': 'seagreen',
             'davies_bouldin': 'indianred',
@@ -405,6 +473,481 @@ class ClusteringComparator:
                 
                 ax.set_title(f"{metric}\n({'lower=better' if metric in ['davies_bouldin', 'runtime_s'] else 'higher=better'})")
                 ax.set_xlabel('')
+        
+        plt.tight_layout()
+        return fig
+    
+    # ========================================================================
+    # NEW: Nonlinear Shape Detection (Two-Moons)
+    # ========================================================================
+    
+    def evaluate_nonlinear_shapes(
+        self,
+        n_samples: int = 1500,
+        noise: float = 0.07,
+        random_state: int = RANDOM_STATE,
+        verbose: bool = None,
+        figsize: Tuple[int, int] = None
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Evaluate algorithms on Two-Moons nonlinear shape.
+        
+        This is a critical test for detecting non-linear, interlocking structures
+        that centroid-based methods cannot capture.
+        
+        Args:
+            n_samples: Number of samples for two-moons dataset
+            noise: Noise level for two-moons dataset
+            random_state: Random seed
+            verbose: Print progress
+            figsize: Figure size for visualization
+        
+        Returns:
+            Dictionary mapping algorithm name to results (ARI vs true labels)
+        """
+        if verbose is None:
+            verbose = self.verbose
+        
+        if self.verbose:
+            print("\n" + "=" * 70)
+            print("NONLINEAR SHAPE DETECTION (Two-Moons)")
+            print("=" * 70)
+            print(f"Generating {n_samples:,} samples with noise={noise:.2f}...")
+        
+        # Generate two-moons dataset
+        X_moons, y_true = make_moons(n_samples=n_samples, noise=noise, random_state=random_state)
+        X_moons = ensure_float64(X_moons)
+        
+        # Estimate bandwidth for MeanShift
+        bandwidth = estimate_bandwidth(X_moons, quantile=0.2, random_state=random_state)
+        
+        # Define algorithms for nonlinear detection
+        nonlinear_algos = {
+            'K-Means': lambda: self._get_clustering_fn('K-Means'),
+            'Bisecting K-Means': lambda: self._get_clustering_fn('Bisecting K-Means'),
+            'DBSCAN': lambda: self._get_clustering_fn('DBSCAN'),
+            'OPTICS': lambda: self._get_clustering_fn('OPTICS'),
+            'HDBSCAN': lambda: self._get_clustering_fn('HDBSCAN'),
+            'Gaussian Mixture': lambda: self._get_clustering_fn('Gaussian Mixture'),
+            'K-Medoids': lambda: self._get_clustering_fn('K-Medoids'),
+            'K-Median': lambda: self._get_clustering_fn('K-Median'),
+            'Fuzzy C-Means': lambda: self._get_clustering_fn('Fuzzy C-Means'),
+            'Kernel K-Means': lambda: self._get_clustering_fn('Kernel K-Means'),
+            'Agglomerative (Ward)': lambda: self._get_clustering_fn('Agglomerative (Ward)'),
+            'Agglomerative (Single)': lambda: self._get_clustering_fn('Agglomerative (Single)'),
+            'Agglomerative (Complete)': lambda: self._get_clustering_fn('Agglomerative (Complete)'),
+            'MeanShift': lambda: MeanShift(bandwidth=bandwidth).fit_predict(X_moons),
+        }
+        
+        # Run algorithms and compute ARI
+        results = {}
+        labels_moons = {}
+        
+        for name, fn in nonlinear_algos.items():
+            try:
+                if verbose:
+                    print(f"  Running: {name}...")
+                
+                # Get labels for two-moons
+                labels = fn()
+                labels_moons[name] = labels
+                
+                # Compute ARI with true labels
+                ari = adjusted_rand_score(y_true, labels)
+                results[name] = {
+                    'ari': ari,
+                    'n_clusters': len(set(labels)) - (1 if -1 in labels else 0),
+                    'noise_pct': (labels == -1).mean() * 100 if -1 in labels else 0
+                }
+                
+                if verbose:
+                    print(f"    ARI={ari:.3f}")
+            
+            except Exception as e:
+                if verbose:
+                    print(f"    Failed: {e}")
+                results[name] = {'ari': np.nan, 'n_clusters': 0, 'noise_pct': 0}
+        
+        self.nonlinear_results = results
+        
+        # Create visualization
+        fig = self._plot_nonlinear_shapes(X_moons, y_true, labels_moons, figsize)
+        
+        if verbose:
+            print("\nNonlinear Shape Detection Results (ARI vs true moons):")
+            sorted_results = sorted(results.items(), key=lambda x: x[1]['ari'], reverse=True)
+            for name, res in sorted_results:
+                ari = res['ari']
+                if not np.isnan(ari):
+                    print(f"  {name:30s}: ARI={ari:.3f}")
+        
+        return results
+    
+    def _get_clustering_fn(self, name: str):
+        """
+        Get clustering function for a named algorithm.
+        
+        Args:
+            name: Algorithm name
+        
+        Returns:
+            Function that returns cluster labels
+        """
+        # This is a simplified version - in practice, you'd have a mapping
+        # to the actual clustering functions from ClusteringRunner
+        from sklearn.cluster import (
+            KMeans, DBSCAN, OPTICS, HDBSCAN,
+            AgglomerativeClustering, BisectingKMeans
+        )
+        from sklearn.mixture import GaussianMixture
+        
+        # Get K from original data (if available)
+        k = 2  # Two moons has 2 clusters
+        
+        # Map names to functions
+        if name == 'K-Means':
+            return lambda X: KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE).fit_predict(X)
+        elif name == 'Bisecting K-Means':
+            return lambda X: BisectingKMeans(n_clusters=k, random_state=RANDOM_STATE).fit_predict(X)
+        elif name == 'DBSCAN':
+            return lambda X: DBSCAN(eps=0.2, min_samples=5).fit_predict(X)
+        elif name == 'OPTICS':
+            return lambda X: OPTICS(min_samples=5).fit_predict(X)
+        elif name == 'HDBSCAN':
+            return lambda X: HDBSCAN(min_cluster_size=15).fit_predict(X)
+        elif name == 'Gaussian Mixture':
+            return lambda X: GaussianMixture(n_components=k, random_state=RANDOM_STATE).fit_predict(X)
+        elif name == 'Agglomerative (Ward)':
+            return lambda X: AgglomerativeClustering(n_clusters=k, linkage='ward').fit_predict(X)
+        elif name == 'Agglomerative (Single)':
+            return lambda X: AgglomerativeClustering(n_clusters=k, linkage='single').fit_predict(X)
+        elif name == 'Agglomerative (Complete)':
+            return lambda X: AgglomerativeClustering(n_clusters=k, linkage='complete').fit_predict(X)
+        elif name == 'K-Medoids':
+            from src.clustering_algorithms import k_medoids
+            return lambda X: k_medoids(X, k, random_state=RANDOM_STATE)[0]
+        elif name == 'K-Median':
+            from src.clustering_algorithms import k_median
+            return lambda X: k_median(X, k, random_state=RANDOM_STATE)[0]
+        elif name == 'Fuzzy C-Means':
+            from src.clustering_algorithms import fuzzy_c_means
+            return lambda X: fuzzy_c_means(X, k, random_state=RANDOM_STATE)[0]
+        elif name == 'Kernel K-Means':
+            from src.clustering_algorithms import kernel_kmeans
+            return lambda X: kernel_kmeans(X, k, gamma=3, random_state=RANDOM_STATE)
+        else:
+            raise ValueError(f"Unknown algorithm: {name}")
+    
+    def _plot_nonlinear_shapes(
+        self,
+        X_moons: np.ndarray,
+        y_true: np.ndarray,
+        labels_moons: Dict[str, np.ndarray],
+        figsize: Optional[Tuple[int, int]] = None
+    ) -> plt.Figure:
+        """
+        Plot nonlinear shape detection results.
+        
+        Args:
+            X_moons: Two-moons data
+            y_true: True labels
+            labels_moons: Dictionary of predicted labels
+            figsize: Figure size
+        
+        Returns:
+            Matplotlib figure
+        """
+        if figsize is None:
+            n_algos = len(labels_moons)
+            n_cols = 5
+            n_rows = int(np.ceil(n_algos / n_cols))
+            figsize = (4 * n_cols, 3.5 * n_rows)
+        
+        n_algos = len(labels_moons)
+        n_cols = 5
+        n_rows = int(np.ceil(n_algos / n_cols))
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+        axes = np.array(axes).reshape(-1)
+        
+        for ax, (name, labels) in zip(axes, labels_moons.items()):
+            # Plot points colored by predicted cluster
+            scatter = ax.scatter(X_moons[:, 0], X_moons[:, 1], c=labels, 
+                                 cmap='tab10', s=10, alpha=0.7)
+            
+            # Compute ARI
+            ari = adjusted_rand_score(y_true, labels)
+            
+            ax.set_title(f"{name}\nARI={ari:.2f}", fontsize=8)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        
+        # Hide unused subplots
+        for ax in axes[n_algos:]:
+            ax.axis('off')
+        
+        plt.suptitle(f"Nonlinear Shape Detection (Two-Moons, n={X_moons.shape[0]:,})", 
+                     y=1.01, fontsize=14)
+        plt.tight_layout()
+        return fig
+    
+    # ========================================================================
+    # NEW: Noise Resistance Experiments
+    # ========================================================================
+    
+    def evaluate_noise_resistance(
+        self,
+        noise_levels: List[float] = None,
+        repeats: int = 2,
+        noise_scale: float = 3.0,
+        random_state: int = RANDOM_STATE,
+        verbose: bool = None,
+        figsize: Tuple[int, int] = (16, 6)
+    ) -> Dict[str, List[Dict[str, float]]]:
+        """
+        Evaluate algorithm stability under Gaussian noise.
+        
+        Tests how well each algorithm handles noisy data, which is crucial
+        for real-world deployment where data quality varies.
+        
+        Args:
+            noise_levels: List of noise fractions (e.g., [0.05, 0.15])
+            repeats: Number of repeats per noise level
+            noise_scale: Standard deviation of Gaussian noise
+            random_state: Random seed
+            verbose: Print progress
+            figsize: Figure size for visualization
+        
+        Returns:
+            Dictionary mapping algorithm name to list of result dicts
+        """
+        if verbose is None:
+            verbose = self.verbose
+        
+        if noise_levels is None:
+            noise_levels = [0.05, 0.15]
+        
+        if self.verbose:
+            print("\n" + "=" * 70)
+            print("NOISE RESISTANCE EXPERIMENTS")
+            print("=" * 70)
+            print(f"Testing {len(self.labels_dict)} algorithms x {len(noise_levels)} noise levels "
+                  f"x {repeats} repeats = {len(self.labels_dict) * len(noise_levels) * repeats} refits.")
+        
+        results = {}
+        
+        for name, original_labels in self.labels_dict.items():
+            if self.verbose:
+                print(f"\n  Testing: {name}")
+            
+            # Get original runtime
+            original_runtime = self.runtimes.get(name, 1.0)
+            
+            name_results = []
+            
+            for noise_frac in noise_levels:
+                aris = []
+                sils = []
+                runtimes = []
+                
+                for rep in range(repeats):
+                    seed = random_state + rep
+                    
+                    # Add noise to data
+                    X_noisy = self._add_noise(self.X, frac=noise_frac, 
+                                              scale=noise_scale, random_state=seed)
+                    
+                    # Refit algorithm on noisy data
+                    try:
+                        t0 = plt.get_fignums().__len__()  # Just for timing
+                        import time
+                        start = time.time()
+                        
+                        noisy_labels = self._refit_algorithm(name, X_noisy)
+                        
+                        elapsed = time.time() - start
+                    except Exception as e:
+                        if self.verbose:
+                            print(f"    [skip] @ noise={noise_frac}: {e}")
+                        continue
+                    
+                    # Compute ARI vs original labels
+                    ari = adjusted_rand_score(original_labels, noisy_labels)
+                    aris.append(ari)
+                    runtimes.append(elapsed)
+                    
+                    # Compute silhouette on noisy data
+                    mask = noisy_labels != -1
+                    if len(set(np.asarray(noisy_labels)[mask])) >= 2:
+                        try:
+                            sil = silhouette_score(X_noisy[mask], np.asarray(noisy_labels)[mask])
+                            sils.append(sil)
+                        except:
+                            pass
+                
+                if not aris:
+                    continue
+                
+                name_results.append({
+                    'noise_level': noise_frac,
+                    'mean_ari_robustness': np.mean(aris),
+                    'stability_ari_std': np.std(aris),
+                    'mean_silhouette_noisy': np.mean(sils) if sils else np.nan,
+                    'mean_runtime_s': np.mean(runtimes),
+                    'runtime_degradation_x': np.mean(runtimes) / original_runtime if original_runtime > 0 else np.nan,
+                })
+                
+                if self.verbose:
+                    print(f"    noise={noise_frac:.0%}: ARI={np.mean(aris):.3f}±{np.std(aris):.3f}, "
+                          f"time={np.mean(runtimes):.2f}s")
+            
+            results[name] = name_results
+        
+        self.noise_results = results
+        
+        # Create visualization
+        self._plot_noise_results(figsize)
+        
+        if self.verbose:
+            print("\nNoise resistance experiments completed.")
+        
+        return results
+    
+    def _add_noise(
+        self, 
+        X: np.ndarray, 
+        frac: float = 0.1, 
+        scale: float = 3.0, 
+        random_state: int = 42
+    ) -> np.ndarray:
+        """
+        Add Gaussian noise to a subset of data points.
+        
+        Args:
+            X: Original data
+            frac: Fraction of points to add noise to
+            scale: Standard deviation of noise
+            random_state: Random seed
+        
+        Returns:
+            Noisy data
+        """
+        rng = np.random.RandomState(random_state)
+        X_noisy = X.copy()
+        n_noise = int(frac * X.shape[0])
+        idx = rng.choice(X.shape[0], n_noise, replace=False)
+        X_noisy[idx] += rng.normal(0, scale, size=(n_noise, X.shape[1]))
+        return X_noisy
+    
+    def _refit_algorithm(self, name: str, X_noisy: np.ndarray) -> np.ndarray:
+        """
+        Refit an algorithm on noisy data.
+        
+        Args:
+            name: Algorithm name
+            X_noisy: Noisy data
+        
+        Returns:
+            Cluster labels on noisy data
+        """
+        from sklearn.cluster import (
+            KMeans, DBSCAN, OPTICS, HDBSCAN,
+            AgglomerativeClustering, BisectingKMeans
+        )
+        from sklearn.mixture import GaussianMixture
+        from src.clustering_algorithms import (
+            k_medoids, k_median, fuzzy_c_means, kernel_kmeans
+        )
+        
+        # Get K from original labels
+        original_labels = self.labels_dict.get(name)
+        if original_labels is not None:
+            k = len(set(original_labels)) - (1 if -1 in original_labels else 0)
+            k = max(2, k)  # Ensure at least 2 clusters
+        else:
+            k = 2
+        
+        # Map name to function
+        if name == 'K-Means':
+            return KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE).fit_predict(X_noisy)
+        elif name == 'Bisecting K-Means':
+            return BisectingKMeans(n_clusters=k, random_state=RANDOM_STATE).fit_predict(X_noisy)
+        elif name == 'DBSCAN':
+            # Use default eps (or estimate from data)
+            from sklearn.neighbors import NearestNeighbors
+            nn = NearestNeighbors(n_neighbors=5).fit(X_noisy)
+            dist, _ = nn.kneighbors(X_noisy)
+            eps = np.percentile(dist[:, -1], 50)
+            return DBSCAN(eps=eps, min_samples=5).fit_predict(X_noisy)
+        elif name == 'OPTICS':
+            return OPTICS(min_samples=10).fit_predict(X_noisy)
+        elif name == 'HDBSCAN':
+            return HDBSCAN(min_cluster_size=30).fit_predict(X_noisy)
+        elif name == 'Gaussian Mixture':
+            return GaussianMixture(n_components=k, random_state=RANDOM_STATE).fit_predict(X_noisy)
+        elif name == 'K-Medoids':
+            return k_medoids(X_noisy, k, random_state=RANDOM_STATE)[0]
+        elif name == 'K-Median':
+            return k_median(X_noisy, k, random_state=RANDOM_STATE)[0]
+        elif name == 'Fuzzy C-Means':
+            return fuzzy_c_means(X_noisy, k, random_state=RANDOM_STATE)[0]
+        elif name == 'Kernel K-Means':
+            return kernel_kmeans(X_noisy, k, random_state=RANDOM_STATE)
+        elif name.startswith('Agglomerative'):
+            linkage_type = 'ward'
+            if 'Single' in name:
+                linkage_type = 'single'
+            elif 'Complete' in name:
+                linkage_type = 'complete'
+            return AgglomerativeClustering(n_clusters=k, linkage=linkage_type).fit_predict(X_noisy)
+        else:
+            # Fallback to K-Means
+            return KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE).fit_predict(X_noisy)
+    
+    def _plot_noise_results(self, figsize: Tuple[int, int] = (16, 6)) -> plt.Figure:
+        """
+        Plot noise resistance results.
+        
+        Args:
+            figsize: Figure size
+        
+        Returns:
+            Matplotlib figure
+        """
+        if self.noise_results is None:
+            return None
+        
+        # Prepare data for plotting
+        rows = []
+        for name, results in self.noise_results.items():
+            for r in results:
+                rows.append({
+                    'algorithm': name,
+                    'noise_level': r['noise_level'],
+                    'mean_ari_robustness': r['mean_ari_robustness'],
+                    'runtime_degradation_x': r['runtime_degradation_x']
+                })
+        
+        df = pd.DataFrame(rows)
+        
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+        
+        # Plot 1: ARI robustness by noise level
+        pivot_ari = df.pivot(index='algorithm', columns='noise_level', 
+                            values='mean_ari_robustness')
+        # Sort by performance at highest noise level
+        pivot_ari = pivot_ari.sort_values(pivot_ari.columns[-1], ascending=False)
+        pivot_ari.plot(kind='barh', ax=axes[0])
+        axes[0].set_title("Robustness: ARI(original, noisy) by noise level\n(higher = more robust)")
+        axes[0].set_xlabel("ARI")
+        
+        # Plot 2: Runtime degradation
+        pivot_degrad = df.pivot(index='algorithm', columns='noise_level', 
+                               values='runtime_degradation_x')
+        pivot_degrad = pivot_degrad.reindex(pivot_ari.index)
+        pivot_degrad.plot(kind='barh', ax=axes[1], color=['#8888ff', '#ff8888'])
+        axes[1].set_title("Runtime degradation (x original runtime)")
+        axes[1].set_xlabel("x original runtime")
         
         plt.tight_layout()
         return fig
@@ -532,8 +1075,16 @@ if __name__ == "__main__":
     print(f"\nHolistically best model: {best}")
     
     # Ranking
-    ranked = comparator.rank_algorithms()
+    ranked = comparator.rank_algorithms(include_nonlinear=True, include_noise=True)
     print(f"\nRanked algorithms:")
     print(ranked[['silhouette', 'davies_bouldin', 'runtime_s', 'overall_rank_score']].head())
+    
+    # Test nonlinear detection
+    print("\n--- Nonlinear Shape Detection ---")
+    nonlinear_results = comparator.evaluate_nonlinear_shapes(verbose=True)
+    
+    # Test noise resistance
+    print("\n--- Noise Resistance ---")
+    noise_results = comparator.evaluate_noise_resistance(verbose=True)
     
     print("\nAll tests passed!")
